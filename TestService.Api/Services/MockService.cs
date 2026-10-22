@@ -15,6 +15,8 @@ public interface IMockService
 
     Task<IEnumerable<MockRequestLog>> GetRequestLogsAsync(string? environment = null, string? path = null, int limit = 100, bool? matched = null);
     Task<long> DeleteRequestLogsAsync(string? environment = null);
+    Task<IEnumerable<MockCallbackLog>> GetCallbackLogsAsync(string? environment = null, string? source = null, string? correlationId = null, int limit = 100);
+    Task<long> DeleteCallbackLogsAsync(string? environment = null);
     Task<MockVerificationResponse> VerifyAsync(MockVerificationRequest request);
 }
 
@@ -115,6 +117,16 @@ public class MockService : IMockService
     public async Task<long> DeleteRequestLogsAsync(string? environment = null)
     {
         return await _repository.DeleteRequestLogsAsync(environment);
+    }
+
+    public async Task<IEnumerable<MockCallbackLog>> GetCallbackLogsAsync(string? environment = null, string? source = null, string? correlationId = null, int limit = 100)
+    {
+        return await _repository.GetCallbackLogsAsync(environment, source, correlationId, limit);
+    }
+
+    public async Task<long> DeleteCallbackLogsAsync(string? environment = null)
+    {
+        return await _repository.DeleteCallbackLogsAsync(environment);
     }
 
     public async Task<MockVerificationResponse> VerifyAsync(MockVerificationRequest request)

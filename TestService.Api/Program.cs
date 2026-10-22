@@ -1,6 +1,7 @@
 using System.Text;
 using Microsoft.AspNetCore.Authentication;
 using Microsoft.AspNetCore.Authentication.JwtBearer;
+using Microsoft.Extensions.DependencyInjection.Extensions;
 using Microsoft.IdentityModel.Tokens;
 using TestService.Api.Authentication;
 using MongoDB.Bson.Serialization;
@@ -236,6 +237,19 @@ builder.Services.AddSingleton<IMessageBusService, MessageBusService>();
 builder.Services.AddSingleton<IMockRepository, MockRepository>();
 builder.Services.AddSingleton<IMockService, MockService>();
 
+// Outbound mock callbacks (provider emulator notifications): options pattern so tests can PostConfigure.
+builder.Services.Configure<MockingSettings>(builder.Configuration.GetSection("Mocking"));
+builder.Services.AddHttpClient(TestService.Api.BackgroundServices.CallbackDispatcher.HttpClientName, client =>
+{
+    client.Timeout = TimeSpan.FromSeconds(30);
+})
+// No automatic redirects: an allowed host must not be able to bounce a callback to a host that is
+// not allowed. A 3xx is logged as the target's reply.
+.ConfigurePrimaryHttpMessageHandler(() => new SocketsHttpHandler { AllowAutoRedirect = false });
+builder.Services.TryAddSingleton(TimeProvider.System);
+builder.Services.AddSingleton<CallbackQueue>();
+builder.Services.AddSingleton<ICallbackDelivery>(sp => sp.GetRequiredService<CallbackQueue>());
+
 // Register Notification service
 builder.Services.AddSingleton<INotificationService, NotificationService>();
 
@@ -257,6 +271,7 @@ builder.Services.AddScoped<IActivityService, ActivityService>();
 // Register background services
 builder.Services.AddHostedService<TestService.Api.BackgroundServices.DataCleanupService>();
 builder.Services.AddHostedService<TestService.Api.BackgroundServices.ActivityCleanupService>();
+builder.Services.AddHostedService<TestService.Api.BackgroundServices.CallbackDispatcher>();
 
 var app = builder.Build();
 Console.WriteLine("[INFO] App built successfully, starting configuration...");

@@ -17,6 +17,29 @@ public class MockServiceTests
         _service = new MockService(_repository, _logger);
     }
 
+    // ── Callback logs: pass-throughs ─────────────────────────────────────────
+
+    [Test]
+    public async Task GetCallbackLogsAsync_PassesFiltersToRepository()
+    {
+        var logs = new[] { new MockCallbackLog { CorrelationId = "42" } };
+        _repository.GetCallbackLogsAsync("e", "praxis", "42", 5).Returns(logs);
+
+        var result = await _service.GetCallbackLogsAsync("e", "praxis", "42", 5);
+
+        Assert.That(result, Is.SameAs(logs));
+    }
+
+    [Test]
+    public async Task DeleteCallbackLogsAsync_ReturnsRepositoryCount()
+    {
+        _repository.DeleteCallbackLogsAsync("e").Returns(3L);
+
+        var deleted = await _service.DeleteCallbackLogsAsync("e");
+
+        Assert.That(deleted, Is.EqualTo(3L));
+    }
+
     // ── ExecuteAsync: path matching ──────────────────────────────────────────
 
     [Test]

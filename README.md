@@ -136,6 +136,7 @@ GET /api/entities/Agent/filter/brandId/brand123
    - Thread-safe parallel test execution support
    - **Bulk entity export/import** (CSV and JSON) with append/upsert modes
    - **Mocks:** Postman Collection v2.1 import and duplicate expectation to another environment
+   - **Outbound callbacks:** delivery component for provider emulators (delayed requests to allowed hosts, recorded in a callback log at `GET`/`DELETE /api/mocks/callbacks`); the upcoming Praxis emulator will be its first producer
    - Built with ASP.NET Core Web API
 
 2. **TestService.Tests** - NUnit test project
@@ -320,9 +321,18 @@ Configuration is in `appsettings.json`:
     "UserName": "guest",
     "Password": "guest",
     "ExchangeName": "test-service-exchange"
+  },
+  "Mocking": {
+    "AllowedCallbackHosts": []
   }
 }
 ```
+
+### Outbound callback hosts
+
+Callback delivery is the component provider emulators use to send delayed callbacks (for example payment notifications); no producer uses it yet, and the upcoming Praxis emulator will be the first. Callbacks go only to hosts listed in `Mocking:AllowedCallbackHosts` (exact, case-insensitive host match). An empty list, the default in `appsettings.json` and Production, sends nothing; Development and Docker allow `localhost`. Override per index with environment variables, for example `Mocking__AllowedCallbackHosts__0=<host>` (this replaces index 0 rather than appending).
+
+Every attempt, including refused (`host not allowed`), failed, `dropped: queue full` and `lost: shutdown` ones, is recorded in the `MockCallbackLogs` collection with the request, the target's status code, headers and first 64 KB of the body, `dueAt`, `sentAt` and `durationMs`. Read it with `GET /api/mocks/callbacks?environment=&source=&correlationId=&limit=` (`mocks.logs.read`, newest first, limit 1..1000, default 100) and clear it with `DELETE /api/mocks/callbacks?environment=` (`mocks.logs.delete`). See [API_INTEGRATION_GUIDE.md](API_INTEGRATION_GUIDE.md#73-outbound-callbacks-and-the-callback-log).
 
 ---
 

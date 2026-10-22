@@ -15,7 +15,7 @@
 4. [Environments](#4-environments)
 5. [Settings & API Keys](#5-settings--api-keys)
 6. [Users](#6-users)
-7. [Mocks (Import & Duplicate)](#7-mocks-import--duplicate)
+7. [Mocks (Import, Duplicate & Callbacks)](#7-mocks-import-duplicate--callbacks)
 8. [Data Models](#8-data-models)
 9. [Error Handling](#9-error-handling)
 10. [Integration Examples](#10-integration-examples)
@@ -695,7 +695,7 @@ Returns created API key with generated key value.
 
 ---
 
-## 7. Mocks (Import & Duplicate)
+## 7. Mocks (Import, Duplicate & Callbacks)
 
 ### 7.1 Import from Postman Collection
 **Endpoint:** `POST /api/mocks/expectations/import/postman?targetEnvironment={env}&pathPrefix={prefix}`  
@@ -728,6 +728,80 @@ Returns created API key with generated key value.
 
 #### Response (200 OK):
 Returns the newly created mock expectation (same structure as a single expectation). The name is suffixed with ` ({targetEnvironment})`.
+
+### 7.3 Outbound Callbacks and the Callback Log
+Callback delivery is the component provider emulators use to send delayed outbound requests, such as signed payment notifications, to a merchant's callback URL. No producer uses it yet: the Praxis emulator, coming next, will be the first. A producer builds each request completely and a background dispatcher sends it unchanged at its due time. There are no retries, and requests still pending when the service stops are not resent.
+
+**Allowed hosts.** A callback is sent only if its URL host is listed in `Mocking:AllowedCallbackHosts` (exact, case-insensitive host match; the port is ignored). An empty list means nothing is sent. Defaults: `localhost` in Development and Docker, nothing in `appsettings.json` and Production. Set it with environment variables, one per index:
+
+```bash
+Mocking__AllowedCallbackHosts__0=billing.qa2.local
+Mocking__AllowedCallbackHosts__1=localhost
+```
+
+An environment variable replaces the appsettings entry at the same index; it does not append.
+
+**Queue.** At most 1000 callbacks can be pending (enqueued and not yet logged); outbound requests time out after 30 seconds and only the first 64 KB of the reply body is kept. Redirects are not followed: a 3xx reply is logged as the target's response.
+
+Every attempt is one entry in the callback log (MongoDB collection `MockCallbackLogs`), including refused, failed, dropped and lost ones:
+
+| `error` | Meaning |
+|---|---|
+| `null` | Sent; `responseStatusCode`, `responseHeaders` and `responseBody` hold the target's reply |
+| `host not allowed` | The URL host is not in `Mocking:AllowedCallbackHosts`; nothing was sent |
+| `invalid url` | The URL is not an absolute http(s) URL; nothing was sent |
+| `dropped: queue full` | 1000 callbacks were already pending |
+| `lost: shutdown` | The service stopped before the callback was sent, or while it was in flight (the status code is kept if the reply headers had arrived) |
+| any other text | Connection error or 30 s timeout; no status code |
+
+#### 7.3.1 List Callback Log
+**Endpoint:** `GET /api/mocks/callbacks?environment={env}&source={source}&correlationId={id}&limit={n}`  
+**Authorization:** Bearer Token Required (`mocks.logs.read`)  
+**Description:** Newest first (by `sentAt`). All filters are optional; `limit` is 1..1000, default 100.
+
+#### Response (200 OK):
+```json
+[
+  {
+    "id": "6717a3f0c2b1e4a5d6f70812",
+    "source": "praxis",
+    "environment": "qa2",
+    "correlationId": "1234567",
+    "url": "http://localhost:5000/api/praxis/notification",
+    "method": "POST",
+    "requestHeaders": { "Content-Type": "application/json", "GT-Authentication": "9f1c..." },
+    "requestBody": "{\"status\":0,...}",
+    "responseStatusCode": 200,
+    "responseHeaders": { "Content-Type": "application/json" },
+    "responseBody": "{\"status\":\"ok\"}",
+    "error": null,
+    "dueAt": "2026-10-22T10:15:00.000Z",
+    "sentAt": "2026-10-22T10:15:00.004Z",
+    "durationMs": 37
+  }
+]
+```
+
+| Field | Description |
+|---|---|
+| `source` | Producer of the callback, for example `praxis` |
+| `correlationId` | Producer's id, for example the emulated transaction id |
+| `requestHeaders`, `requestBody` | The request exactly as built by the producer |
+| `responseStatusCode` | Target's HTTP status; `null` when nothing was received |
+| `responseBody` | First 64 KB of the target's reply |
+| `dueAt` | When the producer asked for the callback to be sent |
+| `sentAt` | When the attempt was recorded: send start for real sends, log time for refused, dropped and lost entries |
+| `durationMs` | Duration of the HTTP exchange |
+
+#### 7.3.2 Delete Callback Log
+**Endpoint:** `DELETE /api/mocks/callbacks?environment={env}`  
+**Authorization:** Bearer Token Required (`mocks.logs.delete`)  
+**Description:** Deletes the callback log entries of one environment (all entries when `environment` is omitted).
+
+#### Response (200 OK):
+```json
+{ "deletedCount": 3 }
+```
 
 ---
 

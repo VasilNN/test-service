@@ -94,7 +94,9 @@ public class SecurityAuthorizationMatrixTests : IntegrationTestBase
                 ResponseTemplate = new MockResponseTemplate { Status = 200, Body = "{}" },
                 Times = new MockTimes { Unlimited = true }
             }),
-            BuildRequest("DELETE", "/api/mocks/requests?environment=dev")
+            BuildRequest("DELETE", "/api/mocks/requests?environment=dev"),
+            BuildRequest("GET", "/api/mocks/callbacks"),
+            BuildRequest("DELETE", "/api/mocks/callbacks?environment=dev")
         };
 
         foreach (var request in requests)
@@ -189,7 +191,31 @@ public class SecurityAuthorizationMatrixTests : IntegrationTestBase
         return request;
     }
 
-    private async Task<UserResponse> CreateContributorUserAsync(string adminToken)
+    [TestCase(PermissionDefinitions.MocksLogsRead, HttpStatusCode.OK, HttpStatusCode.Forbidden)]
+    [TestCase(PermissionDefinitions.MocksLogsDelete, HttpStatusCode.Forbidden, HttpStatusCode.OK)]
+    public async Task CallbackLogEndpoints_WithSinglePermission_EnforceTheirOwnPolicy(
+        string permission, HttpStatusCode expectedGet, HttpStatusCode expectedDelete)
+    {
+        var user = await CreateContributorUserAsync(_adminToken, [permission]);
+        try
+        {
+            SetAuthToken(await GetTokenAsync(user.Username, "Contrib@123"));
+            var environment = $"cb-perm-{Guid.NewGuid():N}";
+
+            var get = await Client.GetAsync($"/api/mocks/callbacks?environment={environment}");
+            var delete = await Client.DeleteAsync($"/api/mocks/callbacks?environment={environment}");
+
+            Assert.That(get.StatusCode, Is.EqualTo(expectedGet), $"GET with only {permission}");
+            Assert.That(delete.StatusCode, Is.EqualTo(expectedDelete), $"DELETE with only {permission}");
+        }
+        finally
+        {
+            SetAuthToken(_adminToken);
+            await Client.DeleteAsync($"/api/users/{user.Id}");
+        }
+    }
+
+    private async Task<UserResponse> CreateContributorUserAsync(string adminToken, List<string>? customPermissions = null)
     {
         SetAuthToken(adminToken);
         var suffix = Guid.NewGuid().ToString("N")[..8];
@@ -199,7 +225,8 @@ public class SecurityAuthorizationMatrixTests : IntegrationTestBase
             Username = username,
             Email = $"{username}@test.local",
             Password = "Contrib@123",
-            Role = UserRole.Contributor
+            Role = UserRole.Contributor,
+            CustomPermissions = customPermissions
         });
 
         AssertStatusCode(response, HttpStatusCode.Created);

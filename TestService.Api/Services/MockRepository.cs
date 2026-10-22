@@ -16,12 +16,17 @@ public interface IMockRepository
     Task CreateRequestLogAsync(MockRequestLog requestLog);
     Task<IEnumerable<MockRequestLog>> GetRequestLogsAsync(string? environment = null, string? path = null, int limit = 100, bool? matched = null);
     Task<long> DeleteRequestLogsAsync(string? environment = null);
+
+    Task CreateCallbackLogAsync(MockCallbackLog callbackLog);
+    Task<IEnumerable<MockCallbackLog>> GetCallbackLogsAsync(string? environment = null, string? source = null, string? correlationId = null, int limit = 100);
+    Task<long> DeleteCallbackLogsAsync(string? environment = null);
 }
 
 public class MockRepository : IMockRepository
 {
     private readonly IMongoCollection<MockExpectation> _expectationsCollection;
     private readonly IMongoCollection<MockRequestLog> _logsCollection;
+    private readonly IMongoCollection<MockCallbackLog> _callbackLogsCollection;
 
     public MockRepository(MongoDbSettings settings)
     {
@@ -29,6 +34,7 @@ public class MockRepository : IMockRepository
         var database = client.GetDatabase(settings.DatabaseName);
         _expectationsCollection = database.GetCollection<MockExpectation>("MockExpectations");
         _logsCollection = database.GetCollection<MockRequestLog>("MockRequestLogs");
+        _callbackLogsCollection = database.GetCollection<MockCallbackLog>("MockCallbackLogs");
 
         CreateIndexes();
     }
@@ -63,6 +69,20 @@ public class MockRepository : IMockRepository
                 )
             };
             _logsCollection.Indexes.CreateMany(logsIndexes);
+
+            var callbackLogsIndexes = new[]
+            {
+                new CreateIndexModel<MockCallbackLog>(
+                    Builders<MockCallbackLog>.IndexKeys
+                        .Ascending(x => x.Environment)
+                        .Descending(x => x.SentAt)
+                ),
+                new CreateIndexModel<MockCallbackLog>(
+                    Builders<MockCallbackLog>.IndexKeys
+                        .Ascending(x => x.CorrelationId)
+                )
+            };
+            _callbackLogsCollection.Indexes.CreateMany(callbackLogsIndexes);
         }
         catch
         {
@@ -170,6 +190,48 @@ public class MockRepository : IMockRepository
         }
 
         var result = await _logsCollection.DeleteManyAsync(filter);
+        return result.DeletedCount;
+    }
+
+    public async Task CreateCallbackLogAsync(MockCallbackLog callbackLog)
+    {
+        await _callbackLogsCollection.InsertOneAsync(callbackLog);
+    }
+
+    public async Task<IEnumerable<MockCallbackLog>> GetCallbackLogsAsync(string? environment = null, string? source = null, string? correlationId = null, int limit = 100)
+    {
+        var filter = Builders<MockCallbackLog>.Filter.Empty;
+        if (!string.IsNullOrWhiteSpace(environment))
+        {
+            filter &= Builders<MockCallbackLog>.Filter.Eq(x => x.Environment, environment);
+        }
+
+        if (!string.IsNullOrWhiteSpace(source))
+        {
+            filter &= Builders<MockCallbackLog>.Filter.Eq(x => x.Source, source);
+        }
+
+        if (!string.IsNullOrWhiteSpace(correlationId))
+        {
+            filter &= Builders<MockCallbackLog>.Filter.Eq(x => x.CorrelationId, correlationId);
+        }
+
+        var cappedLimit = Math.Clamp(limit, 1, 1000);
+        return await _callbackLogsCollection.Find(filter)
+            .SortByDescending(x => x.SentAt)
+            .Limit(cappedLimit)
+            .ToListAsync();
+    }
+
+    public async Task<long> DeleteCallbackLogsAsync(string? environment = null)
+    {
+        var filter = Builders<MockCallbackLog>.Filter.Empty;
+        if (!string.IsNullOrWhiteSpace(environment))
+        {
+            filter = Builders<MockCallbackLog>.Filter.Eq(x => x.Environment, environment);
+        }
+
+        var result = await _callbackLogsCollection.DeleteManyAsync(filter);
         return result.DeletedCount;
     }
 }
