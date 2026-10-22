@@ -18,6 +18,7 @@ public class EmulatedTransactionTests
         ["Authorize"] = t => t.Authorize(Change, Now),
         ["PartiallyApprove"] = t => t.PartiallyApprove(Change, Now),
         ["RequestVerification"] = t => t.RequestVerification(Change, Now),
+        ["Cancel"] = t => t.Cancel(Change, Now),
         ["AwaitAuthentication"] = t => t.AwaitAuthentication(Change, new TransactionDeadline { DueAt = Now, FollowUp = "x" }, Now),
         ["SetDeadline"] = t => t.SetDeadline(new TransactionDeadline { DueAt = Now, FollowUp = "x" }),
         ["SetStatusCheckFollowUp"] = t => t.SetStatusCheckFollowUp("x")
@@ -33,7 +34,8 @@ public class EmulatedTransactionTests
         [TransactionStatus.Error] = t => t.Fail(Change, Now),
         [TransactionStatus.Authorized] = t => t.Authorize(Change, Now),
         [TransactionStatus.PartialApproved] = t => t.PartiallyApprove(Change, Now),
-        [TransactionStatus.Verification] = t => t.RequestVerification(Change, Now)
+        [TransactionStatus.Verification] = t => t.RequestVerification(Change, Now),
+        [TransactionStatus.Cancelled] = t => t.Cancel(Change, Now)
     };
 
     private static readonly Dictionary<string, TransactionStatus[]> Legal = new()
@@ -45,6 +47,7 @@ public class EmulatedTransactionTests
         ["Authorize"] = [TransactionStatus.Initialized],
         ["PartiallyApprove"] = [TransactionStatus.Initialized],
         ["RequestVerification"] = [TransactionStatus.Initialized, TransactionStatus.Approved],
+        ["Cancel"] = [TransactionStatus.Initialized, TransactionStatus.Pending],
         ["AwaitAuthentication"] = [TransactionStatus.Initialized],
         ["SetDeadline"] = [TransactionStatus.Initialized, TransactionStatus.Pending],
         ["SetStatusCheckFollowUp"] = [TransactionStatus.Pending]
@@ -212,6 +215,116 @@ public class EmulatedTransactionTests
             Assert.That(context.Notifications[0].Snapshot.Status, Is.EqualTo(TransactionStatus.Initialized));
             Assert.That(deadline.DueAt, Is.EqualTo(Now.AddSeconds(270)));
             Assert.That(deadline.FollowUp, Is.EqualTo("f"));
+        });
+    }
+
+    [Test]
+    public void Cancel_ClearsProcessedValuesAndDeadline_WireNameCancelled()
+    {
+        var tx = NewTransaction();
+        tx.MarkPending(Change, Now);
+        tx.SetDeadline(new TransactionDeadline { DueAt = Now.AddMinutes(1), FollowUp = "x" });
+
+        tx.Cancel(new StatusChange("0", "cancelled", "failed"), Now);
+
+        Assert.Multiple(() =>
+        {
+            Assert.That(tx.Status, Is.EqualTo(TransactionStatus.Cancelled));
+            Assert.That(tx.Status.ToWire(), Is.EqualTo("cancelled"));
+            Assert.That(tx.ProcessedAmount, Is.Null);
+            Assert.That(tx.ProcessedCurrency, Is.Null);
+            Assert.That(tx.Deadline, Is.Null);
+            Assert.That(System.Text.Json.JsonSerializer.Serialize(tx.Status), Is.EqualTo("\"cancelled\""));
+            Assert.That(System.Text.Json.JsonSerializer.Deserialize<TransactionStatus>("\"cancelled\""), Is.EqualTo(TransactionStatus.Cancelled));
+        });
+    }
+
+    [Test]
+    public void Approve_WithProcessedCurrencyOverride_KeepsItAndTheProcessedAmount()
+    {
+        var tx = EmulatedTransaction.Open("praxis", "env", "m", "sale", "EUR", 1200, Now);
+
+        tx.Approve(new StatusChange("12", "d", "successful") { FinalAmount = 1068, ProcessedAmount = 1200, ProcessedCurrency = "USD" }, Now);
+
+        Assert.Multiple(() =>
+        {
+            Assert.That(tx.Amount, Is.EqualTo(1068));
+            Assert.That(tx.ProcessedAmount, Is.EqualTo(1200));
+            Assert.That(tx.ProcessedCurrency, Is.EqualTo("USD"));
+            Assert.That(tx.Currency, Is.EqualTo("EUR"));
+        });
+    }
+
+    [Test]
+    public void AwaitAuthentication_WithoutDeadline_StaysInitializedWithNoDeadline()
+    {
+        var tx = NewTransaction();
+
+        tx.AwaitAuthentication(new StatusChange("300", "redirect", "open"), deadline: null, Now);
+
+        Assert.Multiple(() =>
+        {
+            Assert.That(tx.Status, Is.EqualTo(TransactionStatus.Initialized));
+            Assert.That(tx.StatusCode, Is.EqualTo("300"));
+            Assert.That(tx.Deadline, Is.Null);
+            Assert.That(tx.History, Has.Count.EqualTo(1));
+        });
+        Assert.Throws<InvalidTransactionTransitionException>(() => tx.AwaitAuthentication(Change, null, Now), "awaited only once");
+    }
+
+    [Test]
+    public void AwaitPageOutcome_ZeroScaledTimeout_SetsNoDeadline_PositiveSetsOne()
+    {
+        var immediate = NewTransaction();
+        new AwaitPageOutcome(Change, TimeSpan.FromSeconds(450), "follow").Apply(immediate, new OutcomeContext(Now, timeScale: 0));
+        var scaled = NewTransaction();
+        new AwaitPageOutcome(Change, TimeSpan.FromSeconds(450), "follow").Apply(scaled, new OutcomeContext(Now, timeScale: 0.5));
+        var none = NewTransaction();
+        new AwaitPageOutcome(Change).Apply(none, new OutcomeContext(Now, timeScale: 1));
+
+        Assert.Multiple(() =>
+        {
+            Assert.That(immediate.Deadline, Is.Null);
+            Assert.That(scaled.Deadline!.DueAt, Is.EqualTo(Now.AddSeconds(225)));
+            Assert.That(scaled.Deadline.FollowUp, Is.EqualTo("follow"));
+            Assert.That(none.Deadline, Is.Null);
+            Assert.That(none.Status, Is.EqualTo(TransactionStatus.Initialized));
+        });
+    }
+
+    [Test]
+    public void NotifyCopyOutcome_NotifiesTheCopyAndLeavesTheTransactionUntouched()
+    {
+        var tx = NewTransaction();
+        var context = new OutcomeContext(Now, timeScale: 1);
+
+        new NotifyCopyOutcome(new ApproveOutcome(new StatusChange("0", "copy", "successful") { FinalAmount = 100 }, TimeSpan.FromSeconds(3)))
+            .Apply(tx, context);
+
+        Assert.Multiple(() =>
+        {
+            Assert.That(tx.Status, Is.EqualTo(TransactionStatus.Initialized));
+            Assert.That(tx.Amount, Is.EqualTo(4900));
+            Assert.That(tx.History, Is.Empty);
+            Assert.That(context.Notifications, Has.Count.EqualTo(1));
+            Assert.That(context.Notifications[0].Snapshot.Status, Is.EqualTo(TransactionStatus.Approved));
+            Assert.That(context.Notifications[0].Snapshot.Amount, Is.EqualTo(100));
+            Assert.That(context.Notifications[0].Delay, Is.EqualTo(TimeSpan.FromSeconds(3)));
+        });
+    }
+
+    [Test]
+    public void AttachWalletOutcome_AttachesBeforeTheInnerOutcomeNotifies()
+    {
+        var tx = NewTransaction();
+        var context = new OutcomeContext(Now, timeScale: 1);
+
+        new AttachWalletOutcome(t => t.ProviderData["wallet"] = "{}", new CancelOutcome(Change, TimeSpan.Zero)).Apply(tx, context);
+
+        Assert.Multiple(() =>
+        {
+            Assert.That(tx.Status, Is.EqualTo(TransactionStatus.Cancelled));
+            Assert.That(context.Notifications.Single().Snapshot.Data("wallet"), Is.EqualTo("{}"));
         });
     }
 }

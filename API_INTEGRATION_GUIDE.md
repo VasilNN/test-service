@@ -818,7 +818,7 @@ At match time each regex evaluation is limited to 100 ms; a pattern that runs lo
 **Log retention.** Setting `dataRetention.mockLogRetentionDays` (`GET`/`PUT /api/settings`, default `7`, `null` keeps logs forever) applies to both mock request logs (by `timestamp`) and callback logs (by `sentAt`). The hourly cleanup deletes entries older than that while `dataRetention.autoCleanupEnabled` is `true`. Settings stored before this field existed read as `7`. Mock expectations and logs are never touched by entity retention.
 
 ### 7.5 Praxis Emulator
-A self-contained Praxis emulator lives at `/emulators/praxis/{environment}/<Praxis path>`, so BillingServer only changes its Praxis base URLs. It behaves like the Praxis sandbox "Test Card Processor" for every documented test case of https://docs.praxis.tech/docs/testing that the API can express (corrected by redacted sandbox captures where they differ): signed requests and responses, encrypted card data, state across calls (find-transaction, capture, refund of an earlier sale), a 3DS simulation page and delayed signed notifications sent through callback delivery (§7.3). test-service never calls a Praxis host. E-wallet flows are not emulated yet.
+A self-contained Praxis emulator lives at `/emulators/praxis/{environment}/<Praxis path>`, so BillingServer only changes its Praxis base URLs. It behaves like the Praxis sandbox "Test Card Processor" for every documented test case of https://docs.praxis.tech/docs/testing that the API can express (corrected by redacted sandbox captures where they differ): signed requests and responses, encrypted card data, state across calls (find-transaction, capture, refund of an earlier sale), a 3DS simulation page and delayed signed notifications sent through callback delivery (§7.3). The "Test E-Wallet" flows of BillingServer's `PraxisEWallet` (deposits through `direct/apm` and its simulation pages, payouts, gateway lookups) are emulated too (§7.5.7). test-service never calls a Praxis host.
 
 The emulator is anonymous like `/mock/*`, and it answers only for environments that have at least one registered merchant. Any other path answers HTTP 404 with a JSON `message` and stores nothing (also for an unknown provider, for example `/emulators/other/...`).
 
@@ -850,8 +850,8 @@ The emulator is anonymous like `/mock/*`, and it answers only for environments t
 | `merchantId` | Required; unique per environment; must equal the request's `merchant_id` |
 | `applicationKey` | Required; must equal the request's `application_key` |
 | `secret` | Required on create, at most 32 characters (it is the AES-256 key, left-padded with `0`); write-only: responses carry `secretLength` instead |
-| `gateways` | At least one `{ id, kind: card\|ewallet, paymentProcessor, paymentMethod }`. A request's `gateway` that is not registered is accepted; processor and method then default to `Test Card Processor` / `Credit Card` |
-| `dropNotifications` | Default `false`; `true` sends no notifications for this merchant |
+| `gateways` | At least one `{ id, kind: card\|ewallet, paymentProcessor, paymentMethod }`. A request's `gateway` that is not registered is accepted; processor and method then default to `Test Card Processor` / `Credit Card` (e-wallet endpoints: `Test E-Wallet` / `altbankwire`) |
+| `dropNotifications` | Default `false`; `true` sends no notifications for this merchant (emulates the QA2 deposits that never got one) |
 | `timeScale` | Number >= 0, default `1.0`; multiplies every emulator delay (notification delays, 3DS and pending timeouts). Tests use `0` (everything immediate) or a small positive value when they need the 3DS page |
 
 #### 7.5.2 Endpoints, Signatures and Rejections
@@ -904,9 +904,9 @@ The 3DS page answers with real HTTP statuses and a JSON `message`: `GET`/submit 
 #### 7.5.4 Pointing BillingServer at the Emulator
 1. Register the merchant (§7.5.1) with BillingServer's merchant id, application key, gateway password (`secret`) and card gateway hash.
 2. Card gateway URLs: `<test-service>/emulators/praxis/<env>/api/direct-process` (sale, payout), `<test-service>/emulators/praxis/<env>/direct/refund`, and `<test-service>/emulators/praxis/<env>/` as the base BillingServer appends `agent/find-transaction` and `agent/manage-transaction` to.
-3. E-wallet `SiteUrl` (once e-wallet flows are emulated): `<test-service>/emulators/praxis/<env>/`.
+3. E-wallet `SiteUrl`: `<test-service>/emulators/praxis/<env>/` (§7.5.7); register the e-wallet gateway hash as an `ewallet` gateway.
 4. Allow BillingServer's notification host: `Mocking__AllowedCallbackHosts__0=<billing host>`.
-5. Lower `timeScale` to shorten the 15 s notification delay and the 540 s timeouts.
+5. Lower `timeScale` to shorten the notification delays (15 s card, 12 s e-wallet) and the timeouts (540 s card, 450 s e-wallet).
 
 #### 7.5.5 Test Cases (card, Test Card Processor)
 Amounts are in minor units (`4900` = 49.00). CVV other than the listed ones declines.
@@ -947,7 +947,102 @@ These points have no Praxis source; the emulator fixes them:
 - **Notifications:** 15 s after a state change that notifies (approved, declined and partial sales, every 3DS result and timeout; the 334/335 pairs 5 s apart). Payouts, refunds, captures, amount cases and status-check follow-ups send none. A notification's `timestamp` is its send time.
 - **Timeouts:** 540 s for an abandoned 3DS page, for 3DS Pending and for 588 + 713. A deadline is due when `now >= dueAt`; it is applied before every read or action on the transaction and by a background service every second, whichever saves first (optimistic versioning), so it is applied once.
 - **Ids and tokens:** tids are unique across environments, start at 1000000 and stay within int32; `customer_token` and `card_token` are derived from the merchant and the customer `cid` / card number; card fields are masked (`411111******1111`), typed by the first digit (`VISA`, `MASTERCARD`, `AMEX`) and issued by `EMULATOR TEST BANK`.
-- **Session status** follows the sandbox: `successful`, `failed`, `open` (pending, initialized, partial, 3DS verification) or `action required` (authorized, captured, cancelled).
+- **Session status** follows the sandbox: `successful`, `failed`, `open` (pending, initialized, partial, 3DS verification) or `action required` (authorized, captured, and an authorization cancelled through card `manage-transaction`). An e-wallet sale cancelled on its page is `failed`.
+
+#### 7.5.7 E-Wallet (Test E-Wallet, altbankwire)
+BillingServer's Praxis e-wallet (`PraxisEWallet`) uses the e-wallet `SiteUrl` `<test-service>/emulators/praxis/<env>/` and appends the paths below. Register the merchant with an `ewallet` gateway (for example `{ "id": "f7b7f9f8e9c5f906e1e7a8e91e28c820", "kind": "ewallet", "paymentProcessor": "Test E-Wallet", "paymentMethod": "altbankwire" }`); an unregistered `gateway` defaults to `Test E-Wallet` / `altbankwire`. The method name (`paymentMethod`) appears in the `wallet_data` messages. Behaviour follows the sandbox captures of 2026-10-22 where they differ from the testing page.
+
+| Praxis endpoint | Path under `/emulators/praxis/{env}/` | Request signature fields |
+|---|---|---|
+| E-wallet sale or payout | `POST direct/apm` | `merchant_id, application_key, timestamp, transaction_type, cid, order_id, currency, amount, gateway, notification_url, return_url` |
+| Payout to a stored wallet | `POST direct/wallet-token` (`transaction_type` `payout` only; no `wallet_data`) | the `direct/apm` fields, then `wallet_token` |
+| Gateway lookups | `POST agent/get-available-gateways`, `POST agent/get-gateway-options` | `merchant_id, application_key, timestamp` |
+| Cancel / complete a withdrawal request | `POST agent/manage-withdrawal-request` (`intent` `cancel-withdrawal-request` or `complete-withdrawal-request`, `withdrawal_request_id` = payout tid) | `merchant_id, application_key, timestamp, intent, withdrawal_request_id` |
+| Find transaction | `POST agent/find-transaction` (shared with cards) | as cards |
+
+Notifications and the merchant's reply work as for cards (same signature formula; the reply BillingServer sends is only logged).
+
+**Page chain.** A sale answers `initialized`, `No status details`, with `redirect_url` = `.../pages/apm-request/{tid}`:
+
+| Page | Behaviour |
+|---|---|
+| `GET pages/apm-request/{tid}` | "Please wait" HTML; its script loads `pages/apm/{tid}` |
+| `GET pages/apm/{tid}` | Amounts 487, 999, 1078, 1079, 334: applies the outcome on opening and redirects (302) to `return_url`. Other amounts: five buttons (Approve, Pending, Declined, Cancelled, Verification), each loading `pages/apm/{tid}/response?status=approved\|pending\|declined\|cancelled\|verification` |
+| `GET pages/apm/{tid}/response?status=` | Applies the button's outcome and redirects (302) to `return_url` (a plain "done" page without one) |
+| `GET pages/payout/{tid}` | Payout 300's `redirect_url`: "Test E-Wallet 3DS page" with a "Back to merchant website" link to `return_url`; changes nothing |
+
+Every page answers HTTP 404 (`message`) for an unknown tid, a tid of another environment or of the wrong kind. `pages/apm/{tid}` and `pages/apm/{tid}/response` also answer 409 when the sale no longer awaits its page (decided or timed out, including a second button), and `.../response` 400 for an unknown `status`; the "Please wait" page `pages/apm-request/{tid}` answers 200 for any existing e-wallet sale.
+
+**`wallet_data` rules** (checked after the merchant and signature, in the `status 400` list after the blank fields and `Amount must be an integer.`, before an expired timestamp; messages joined by `,`; nothing is stored):
+
+| Request | Rule | Message |
+|---|---|---|
+| Sale | `phone`, `ip_address`, `QA` required (in that order) | `[phone] field is required!` |
+| Sale | `customer_country` one of `country_ukraine, country_cyprus, country_usa, country_canada, IN` | `'country_bulgaria' value is not valid for the [customer_country] field!` |
+| Sale | Keys limited to `name, email, phone, customer_country, zip, dqa_t, test, ip_address, QA, testNumber` | `Unknown property received within wallet_data for altbankwire: '<key>'` |
+| Payout | `email` required; every other key is unknown | `[email] field is required!`, then one unknown-property message per other key |
+
+Other rejections are the card ones (§7.5.2): `401 User not found`, `status 1 Validation Error`, blanks `Transaction Type, Currency, Amount, Cid, Order Id` (no customer or device fields), and a `transaction_type` other than `sale`/`payout` (`direct/wallet-token`: other than `payout`) -> `{"status":1,"description":"Gateway does not support the transaction type (<type>)"}`.
+
+**Sale outcomes** (code `0` unless given; approved and pending outcomes have processed = final amount, rejected, cancelled and verification outcomes processed `null`; each change notifies 12 s later unless stated):
+
+| Trigger | Result |
+|---|---|
+| Page open, amount 487 | `rejected`, code `NoMoneyCode`, `test Insufficient funds msg APM!` |
+| Page open, amount 999 | `rejected`, `[TEST] Insufficient funds [TEST CASE - amount 999]` |
+| Page open, amount 1078 / 1079 | `approved`, amount 108000 / 115400, `[TEST] Change amount less than 0.4%` / `[TEST] Change amount between 0.4% and 10%` |
+| Page open, amount 334 | `verification`, amount 26720, `No status details`, no notification of its own; three notifications of copies: `approved` 13360 (12 s), `rejected` 33400 (17 s), `approved` 13360 (22 s) |
+| Approve | `approved`, `[TEST] Transaction status: approved` |
+| Approve, amount 11 / 19 | `approved`, amount 1000 / 2000, code `11` / `19`, `[TEST CASE - amount 11] Changing final amount to 10` / `[TEST CASE - amount 19] Changing final amount to 20` |
+| Approve, amount 12 | `approved`, amount 1068 EUR, processed 1200 **USD**, code `12`, `[TEST CASE - amount 12] Changing final currency` |
+| Approve, amount 13 / 14 / 46 | `verification`, amount 1625 / x100 / x2, codes `13` / `14` / `46`, `[TEST CASE - amount 13] Changing final currency and amount` / `... 14] Changing final amount to x100` / `... 46] Changing final amount to x2` |
+| Pending | `pending`, `[TEST] Transaction status: pending. Reason: Awaiting authorization`, no notification; 450 s later `rejected`, `Transaction timed out. Old status pending. New status declined`, notification |
+| Declined | `rejected`, `[TEST] Transaction status: declined. Reason: Insufficient funds` |
+| Cancelled | `cancelled`, `[TEST] Transaction status: cancelled` |
+| Verification | `verification`, `[TEST] Transaction status: verification` |
+| Page never submitted | 450 s after the sale: `rejected`, `Transaction timed out. Old status pending. New status declined`, notification |
+| No notification (QA2: some approved deposits got none and were resolved by find-transaction) | register the merchant with `dropNotifications: true` |
+
+The `wallet` object (`card` is always `null`) is attached by Approve (also 13/14/46): `data {customer_email, IBAN: "XX00TEST00000000000000"}`; by page-open 1078, 1079, 334: the ten payment keys with the values sent (missing ones `null`); by an approved payout: `name, email, phone, customer_country, ip_address, any_field`. `wallet_token` is 16 hex characters derived from merchant, `cid` and `wallet_data.email`; `account_identifier` is that e-mail.
+
+**Payouts** (`direct/apm` payout and `direct/wallet-token`; no page except 300, never a notification; processed = requested amount):
+
+| Amount | Result |
+|---|---|
+| 11 / 12 / 13 / 14 / 19 / 46 | `approved`, code = amount, final 1000 / 1200 / 2600 / x100 / 2000 / x2, `[TEST] Payout capture successfully` |
+| 50 | `error`, code `200`, `[TEST] Incorrect processor response for payout [TEST CASE - amount 50]` |
+| 200 | `rejected`, code `NoMoneyCode`, `test Insufficient payout funds msg APM!` |
+| 300 | `initialized` (stays), code `300`, `[TEST] Redirect for payout initiated [TEST CASE - amount 300]`, `redirect_url` = `.../pages/payout/{tid}` |
+| 332 / 333 | `pending` (stays), code `333` for both, `[TEST] Payout capture pending [TEST CASE - amount 332.00]` / `333.00]` |
+| 600 | `rejected`, code `600`, `[TEST] Payout capture failed [TEST CASE - amount 600]` |
+| 700 | `pending` (stays), code `50`, `[TEST] Payout capture error [TEST CASE - amount 700]` |
+| other (500, 800, ...) | `approved`, code `0`, `[TEST] Payout capture successfully` (the documented "accepted, then ..." stage does not occur) |
+
+`direct/wallet-token` uses the same table; wallet data and customer come from the merchant's newest transaction with that `wallet_token` (an unknown token still pays out, with an empty wallet).
+
+**manage-withdrawal-request** (agent authentication, expired timestamp as on `agent/*`). No emulated payout is ever `requested`, so nothing changes:
+
+| Request | Reply |
+|---|---|
+| `cancel-withdrawal-request` without `withdrawal_request_id` | `{"status":400,"description":"Withdrawal Request Id cannot be blank."}` |
+| `complete-withdrawal-request` without id, or another `intent` | `{"status":1,"description":"Generic Error"}` |
+| Unknown id, a tid of another merchant, or not an e-wallet payout | `{"status":401,"description":"Wrong credentials"}` |
+| Cancel | `{"status":400,"description":"Payout request is already processed"}` (signed) |
+| Complete without `gateway` | `{"status":400,"description":"The gateway field is required because the payment method is not Credit Card."}` (signed) |
+| Complete with `gateway` | `{"status":400,"description":"Payout request status must be \"requested\" in order to proceed with processing (currently \"<status>\")"}` (signed) |
+
+**Refund** (`direct/refund`) whose `reference_id` is an e-wallet transaction, any amount: signed `{"status":1,"description":"Gateway for reference_id  does not allow refunding"}` (two spaces, as Praxis); nothing is stored.
+
+**Gateway lookups** answer `status 0 Ok`, signed, one entry per registered gateway in order (`gateway_list` for `get-available-gateways`, `gateway_options` for `get-gateway-options`), keys as BillingServer's `ResponseModels/GetAvailableGateways/*` and `PraxisGetGatewayOptionsResponse`. A `card` gateway uses the captured Test Card Processor entry, an `ewallet` gateway the captured Test E-Wallet entry (input fields, processing currencies, countries); `gateway` = id, `payment_method` and `display_name`/`payment_processor` from the registered gateway (defaults `Credit Card` / `Test Card Processor` and `altbankwire` / `Test E-Wallet`), `system_name` = `<processor> - <merchantId>`, `image` `""`. Request filters (`currency`, `country`, `gateway`, `transaction_type`) are ignored, as the sandbox answered the same list for sale and payout.
+
+**Body shapes.** The `direct/apm` reply has `is_async: null`, `cascade_level: null`, `card: null`, `wallet` (null until attached), `session.processed_amount` 0 unless already approved, and `redirect_url` in `transaction` for a sale and payout 300. find-transaction renders a payout, or a sale still waiting for its page, the same way (no `is_3d`); a decided sale like a card one (`is_3d: 0`, `cascade_level: 0`, no `is_async`). Notifications carry `is_async: 0`. `session.processed_currency` shows the processed currency (USD for amount 12).
+
+**Emulator-defined (e-wallet):**
+- Notification delay 12 s after a notifying change (QA2: about 12 s); Verification (button and 13/14/46) notifies; Pending does not. The 334 copies notify 12/17/22 s after the page opens, with amounts from the testing page (`133.6`, `334`, `133.6`); their `status_details` are `No status details`.
+- Page timeout and Pending timeout: 450 s (QA2 "about 450 s"), scaled by `timeScale`. With `timeScale: 0` the page wait has **no** deadline (otherwise the page could never be used); Pending still times out at once, like every other emulator timeout.
+- Payout 300's `redirect_url` points straight at the payout page (the sandbox redirects through an extra 302).
+- Signed business replies: manage-withdrawal-request's three captured refusals and the e-wallet refund rejection; blank-id, `Generic Error` and authentication rejections are unsigned.
+- Not emulated: e-wallet `authorization` (the `direct/apm` reference allows only `sale`) and amounts 0.011, 0.012, 0.013.
 
 ---
 

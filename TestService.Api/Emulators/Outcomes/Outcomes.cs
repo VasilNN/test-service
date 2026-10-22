@@ -121,3 +121,53 @@ public sealed class NotificationSequenceOutcome(params IOutcome[] steps) : IOutc
         }
     }
 }
+
+/// <summary>Cancels the transaction (the customer cancelled on the e-wallet page); optionally notifies.</summary>
+public sealed class CancelOutcome(StatusChange change, TimeSpan? notifyAfter = null) : IOutcome
+{
+    public void Apply(EmulatedTransaction transaction, OutcomeContext context)
+    {
+        transaction.Cancel(change, context.Now);
+        context.Notify(transaction, notifyAfter);
+    }
+}
+
+/// <summary>
+/// Keeps the transaction <c>initialized</c> while a redirect page is shown. With a positive scaled
+/// <paramref name="timeout"/> the follow-up applies when nobody decides; without a timeout, or when the
+/// merchant's time scale makes it zero, no deadline is set and the transaction stays initialized.
+/// </summary>
+public sealed class AwaitPageOutcome(StatusChange change, TimeSpan? timeout = null, string? followUp = null) : IOutcome
+{
+    public void Apply(EmulatedTransaction transaction, OutcomeContext context)
+    {
+        var deadline = timeout is { } after && followUp is not null && context.Scale(after) > TimeSpan.Zero
+            ? context.Deadline(after, followUp)
+            : null;
+        transaction.AwaitAuthentication(change, deadline, context.Now);
+    }
+}
+
+/// <summary>
+/// Attaches provider data (for example the e-wallet <c>wallet</c> object) to the transaction, then applies
+/// <paramref name="inner"/>, so the inner outcome's notifications already carry it.
+/// </summary>
+public sealed class AttachWalletOutcome(Action<EmulatedTransaction> attach, IOutcome inner) : IOutcome
+{
+    public IOutcome Inner { get; } = inner;
+
+    public void Apply(EmulatedTransaction transaction, OutcomeContext context)
+    {
+        attach(transaction);
+        Inner.Apply(transaction, context);
+    }
+}
+
+/// <summary>
+/// Records the notification(s) of a <em>copy</em> of the transaction with <paramref name="inner"/> applied;
+/// the real transaction is left untouched (a provider that notifies statuses the transaction never keeps).
+/// </summary>
+public sealed class NotifyCopyOutcome(IOutcome inner) : IOutcome
+{
+    public void Apply(EmulatedTransaction transaction, OutcomeContext context) => inner.Apply(transaction.Clone(), context);
+}

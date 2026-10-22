@@ -128,7 +128,10 @@ public static class PraxisTestCases
     /// <summary>The outcome of <c>cancel-authorization</c>.</summary>
     public static IOutcome ForCancel() => new DeclineOutcome(Change("0", "Transaction status: Cancelled", "action required"));
 
-    /// <summary>The outcome of a deadline or status-check follow-up; null for an unknown (or empty) name.</summary>
+    /// <summary>
+    /// The outcome of a deadline or status-check follow-up (card or e-wallet, <see cref="PraxisEWalletCases.FollowUp"/>);
+    /// null for an unknown (or empty) name.
+    /// </summary>
     public static IOutcome? FollowUp(string? name) => name switch
     {
         ThreeDsAbandoned => new DeclineOutcome(Change("530", TimedOutPendingAsync, "failed"), NotificationDelay),
@@ -137,7 +140,7 @@ public static class PraxisTestCases
         StatusCheck30 => new ApproveOutcome(Change("30.00", "[TEST CASE - amount 30.00] transaction status changed from pending to approved", "successful")),
         StatusCheckRefund332 => new DeclineOutcome(Change("332.00", "[TEST CASE - amount 332] transaction status changed from pending to rejected", "failed")),
         StatusCheckRefund333 => new ApproveOutcome(Change("333.00", "[TEST CASE - amount 333] transaction status changed from pending to approved", "successful")),
-        _ => null
+        _ => PraxisEWalletCases.FollowUp(name)
     };
 
     /// <summary>The 3DS page buttons: <c>approved</c>, <c>declined</c>, <c>pending</c>, <c>verification</c>.</summary>

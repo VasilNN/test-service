@@ -24,4 +24,7 @@ public interface ITransactionRepository
 
     /// <summary>The newest transaction of the merchant that carries <paramref name="cardToken"/>.</summary>
     Task<EmulatedTransaction?> FindByCardTokenAsync(string environment, string merchantId, string cardToken);
+
+    /// <summary>The newest transaction of the merchant that carries <paramref name="walletToken"/> (e-wallet).</summary>
+    Task<EmulatedTransaction?> FindByWalletTokenAsync(string environment, string merchantId, string walletToken);
 }

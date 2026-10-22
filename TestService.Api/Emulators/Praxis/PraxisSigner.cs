@@ -14,6 +14,12 @@ public static class PraxisSigner
 {
     public const string HeaderName = "GT-Authentication";
 
+    private static readonly string[] ApmFields =
+    [
+        "merchant_id", "application_key", "timestamp", "transaction_type", "cid", "order_id",
+        "currency", "amount", "gateway", "notification_url", "return_url"
+    ];
+
     public static string Sign(IEnumerable<string?> parts, string secret) =>
         Convert.ToHexStringLower(SHA384.HashData(Encoding.UTF8.GetBytes(string.Concat(parts) + secret)));
 
@@ -25,6 +31,22 @@ public static class PraxisSigner
         return Sign(Fields(request, "merchant_id", "application_key", "timestamp", "transaction_type", "cid", "order_id",
             "currency", "amount", "gateway", "notification_url", "return_url").Append(cardPart), secret);
     }
+
+    /// <summary>Signature of a <c>direct/apm</c> sale or payout request (the <c>direct-process</c> fields without the card part).</summary>
+    public static string ForApm(JsonNode? request, string secret) =>
+        Sign(Fields(request, ApmFields), secret);
+
+    /// <summary>Signature of a <c>direct/wallet-token</c> payout request: the <c>direct/apm</c> fields plus <c>wallet_token</c>.</summary>
+    public static string ForWalletToken(JsonNode? request, string secret) =>
+        Sign(Fields(request, [.. ApmFields, "wallet_token"]), secret);
+
+    /// <summary>Signature of an <c>agent/get-available-gateways</c> or <c>agent/get-gateway-options</c> request.</summary>
+    public static string ForGatewayLookup(JsonNode? request, string secret) =>
+        Sign(Fields(request, "merchant_id", "application_key", "timestamp"), secret);
+
+    /// <summary>Signature of an <c>agent/manage-withdrawal-request</c> request.</summary>
+    public static string ForManageWithdrawal(JsonNode? request, string secret) =>
+        Sign(Fields(request, "merchant_id", "application_key", "timestamp", "intent", "withdrawal_request_id"), secret);
 
     /// <summary>Signature of a <c>direct/refund</c> request.</summary>
     public static string ForRefund(JsonNode? request, string secret) =>

@@ -150,4 +150,40 @@ public class PraxisSignerAndCipherTests
             Assert.That(PraxisCardCipher.TryDecrypt(cipher, new string('k', 40), "100", out _), Is.False, "key over 32 bytes");
         });
     }
+
+    [Test]
+    public void ForApm_SignsTheDirectProcessFieldsWithoutACardPart()
+    {
+        var request = JsonNode.Parse("""
+            {"merchant_id":"m1","application_key":"app","timestamp":5,"transaction_type":"sale","cid":"c","order_id":"o",
+             "currency":"EUR","amount":20000,"gateway":"gw","notification_url":"https://n","return_url":"https://r",
+             "wallet_data":{"email":"e"},"card_token":"ignored"}
+            """);
+
+        Assert.That(PraxisSigner.ForApm(request, Secret), Is.EqualTo(Expected("m1app5salecoEUR20000gwhttps://nhttps://r")));
+    }
+
+    [Test]
+    public void ForWalletToken_AppendsTheWalletToken()
+    {
+        var request = JsonNode.Parse("""
+            {"merchant_id":"m1","application_key":"app","timestamp":5,"transaction_type":"payout","cid":"c","order_id":"o",
+             "currency":"EUR","amount":100,"gateway":"gw","notification_url":"https://n","return_url":"https://r","wallet_token":"wt"}
+            """);
+
+        Assert.That(PraxisSigner.ForWalletToken(request, Secret), Is.EqualTo(Expected("m1app5payoutcoEUR100gwhttps://nhttps://rwt")));
+    }
+
+    [Test]
+    public void ForGatewayLookupAndManageWithdrawal_SignTheirFields()
+    {
+        var lookup = JsonNode.Parse("""{"merchant_id":"m","application_key":"a","timestamp":7,"transaction_type":"sale","currency":"EUR"}""");
+        var manage = JsonNode.Parse("""{"merchant_id":"m","application_key":"a","timestamp":7,"intent":"cancel-withdrawal-request","withdrawal_request_id":1000003}""");
+
+        Assert.Multiple(() =>
+        {
+            Assert.That(PraxisSigner.ForGatewayLookup(lookup, Secret), Is.EqualTo(Expected("ma7")));
+            Assert.That(PraxisSigner.ForManageWithdrawal(manage, Secret), Is.EqualTo(Expected("ma7cancel-withdrawal-request1000003")));
+        });
+    }
 }

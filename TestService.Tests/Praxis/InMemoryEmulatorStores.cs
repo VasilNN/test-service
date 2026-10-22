@@ -126,6 +126,18 @@ public class InMemoryTransactionRepository : ITransactionRepository
                 .FirstOrDefault());
         }
     }
+
+    public Task<EmulatedTransaction?> FindByWalletTokenAsync(string environment, string merchantId, string walletToken)
+    {
+        lock (_gate)
+        {
+            return Task.FromResult(_store.Values
+                .Where(t => t.Environment == environment && t.MerchantId == merchantId && t.Data("wallet_token") == walletToken)
+                .OrderByDescending(t => t.CreatedAt)
+                .Select(t => t.Clone())
+                .FirstOrDefault());
+        }
+    }
 }
 
 /// <summary>In-memory <see cref="IPraxisMerchantRepository"/> with the unique environment + merchantId rule.</summary>

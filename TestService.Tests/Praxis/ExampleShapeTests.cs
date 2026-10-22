@@ -41,7 +41,11 @@ public class ExampleShapeTests
                 MerchantId = "<merchant_id>",
                 ApplicationKey = "<application_key>",
                 Secret = Secret,
-                Gateways = [new PraxisGateway { Id = PraxisRequestBuilder.CardGateway, Kind = "card" }],
+                Gateways =
+                [
+                    new PraxisGateway { Id = PraxisRequestBuilder.CardGateway, Kind = "card" },
+                    new PraxisGateway { Id = PraxisRequestBuilder.EWalletGateway, Kind = "ewallet" }
+                ],
                 TimeScale = 1
             }).GetAwaiter().GetResult();
         }
@@ -57,6 +61,12 @@ public class ExampleShapeTests
         public string? CardToken { get; set; }
         public string? CustomerToken { get; set; }
         public string? RedirectPath { get; set; }
+
+        /// <summary>Every transaction the replay created: the example's request timestamp, the tid issued and its type.</summary>
+        public List<(long RequestTimestamp, long Tid, string Type)> Created { get; } = new();
+
+        /// <summary>Page recordings (<c>*.meta.json</c>) already replayed.</summary>
+        public HashSet<string> DrivenPages { get; } = new(StringComparer.Ordinal);
 
         public long Now => Time.GetUtcNow().ToUnixTimeSeconds();
     }
@@ -89,6 +99,15 @@ public class ExampleShapeTests
             if (step.Name == "find-transaction-after-page.json")
             {
                 await PressPageAsync(replay, folder, at - TimeSpan.FromSeconds(1));
+                await DriveEWalletPagesAsync(replay, folder, at - TimeSpan.FromSeconds(1), "sale-redirect-page", "apm-page", "apm-response");
+            }
+            if (step.Name == "find-transaction-after-button.json")
+            {
+                await DriveEWalletPagesAsync(replay, folder, at - TimeSpan.FromSeconds(1), "sale-2-redirect-page", "apm-page", "apm-page-");
+            }
+            if (step.Path == "agent/find-transaction")
+            {
+                await DriveEWalletPagesAsync(replay, folder, at - TimeSpan.FromSeconds(1), "payout-redirect-page", "payout-page");
             }
             replay.Time.Now = at;
 
@@ -105,6 +124,7 @@ public class ExampleShapeTests
         {
             _ when folder.StartsWith("card-payout-", StringComparison.Ordinal) && folder != "card-payout-seed" => "card-payout-seed",
             _ when folder.StartsWith("card-refund-", StringComparison.Ordinal) && folder != "card-refund-seed" => "card-refund-seed",
+            _ when folder.StartsWith("ewallet-refund-", StringComparison.Ordinal) && folder != "ewallet-refund-seed" => "ewallet-refund-seed",
             "errors" => "errors-seed",
             _ => null
         };
@@ -151,11 +171,11 @@ public class ExampleShapeTests
             request["card_token"] = replay.CardToken;
             request["customer_token"] = replay.CustomerToken;
         }
-        foreach (var key in new[] { "tid", "reference_id" })
+        foreach (var key in new[] { "tid", "reference_id", "withdrawal_request_id" })
         {
             if (request[key] is JsonValue value && value.GetValue<long>() == RedactedTid)
             {
-                request[key] = replay.LastTid;
+                request[key] = RedactedTarget(replay, step);
             }
         }
 
@@ -178,14 +198,31 @@ public class ExampleShapeTests
         return (reply, reply.Json()!);
     }
 
+    /// <summary>
+    /// The tid a redacted id stands for: in <c>find-transaction-after-&lt;N&gt;s</c> the transaction whose request
+    /// timestamp is closest to the step's timestamp minus N (the capture script re-read remembered transactions
+    /// N seconds after creating them); otherwise the last created transaction.
+    /// </summary>
+    private static long? RedactedTarget(Replay replay, Step step)
+    {
+        var after = Regex.Match(step.Name, @"^find-transaction-after-(\d+)s\.json$");
+        if (!after.Success || replay.Created.Count == 0)
+        {
+            return replay.LastTid;
+        }
+        var createdAt = step.Timestamp - long.Parse(after.Groups[1].Value, CultureInfo.InvariantCulture);
+        return replay.Created.MinBy(c => Math.Abs(c.RequestTimestamp - createdAt)).Tid;
+    }
+
     private static void Remember(Replay replay, Step step, JsonNode actual)
     {
-        if (step.Path is not ("api/direct-process" or "direct/refund") || PraxisSigner.Text(actual, "status") != "0")
+        if (step.Path is not ("api/direct-process" or "direct/refund" or "direct/apm") || PraxisSigner.Text(actual, "status") != "0")
         {
             return;
         }
 
         replay.LastTid = actual["transaction"]!["tid"]!.GetValue<long>();
+        replay.Created.Add((step.Timestamp, replay.LastTid.Value, PraxisSigner.Text(actual, "transaction.transaction_type")));
         if (PraxisSigner.Text(actual, "transaction.transaction_type") == "sale")
         {
             replay.CardToken = PraxisSigner.Text(actual, "transaction.card.card_token");
@@ -229,6 +266,78 @@ public class ExampleShapeTests
         Assert.That(submit.StatusCode, Is.EqualTo(recorded["http_status"]!.GetValue<int>()), $"{folder}: 3DS submit {status}");
     }
 
+    /// <summary>
+    /// Replays the recorded e-wallet pages of <paramref name="folder"/> whose names match <paramref name="names"/>
+    /// (in that order, each once; a name ending in '-' is a prefix) against the emulator's pages of the latest sale or
+    /// payout, and asserts the recorded HTTP status. Mapping: a sale's redirect page and any recorded "Please wait"
+    /// page -> <c>pages/apm-request/{tid}</c>; <c>apm-page</c> (buttons) and <c>apm-response</c> (page-open
+    /// outcome, 302) -> <c>pages/apm/{tid}</c>; <c>apm-page-&lt;status&gt;</c> -> <c>pages/apm/{tid}/response?status=</c>;
+    /// <c>payout-redirect-page</c> and <c>payout-page</c> -> <c>pages/payout/{tid}</c> (the emulator's
+    /// <c>redirect_url</c> points straight at the payout page, so the sandbox's 302 hop ends there with 200).
+    /// </summary>
+    private static async Task DriveEWalletPagesAsync(Replay replay, string folder, DateTimeOffset at, params string[] names)
+    {
+        if (!folder.StartsWith("ewallet-", StringComparison.Ordinal))
+        {
+            return;
+        }
+        var metas = Directory.GetFiles(Path.Combine(SandboxRoot, folder), "*.meta.json")
+            .Select(f => System.IO.Path.GetFileName(f)[..^".meta.json".Length])
+            .ToList();
+        foreach (var wanted in names)
+        {
+            var matches = metas
+                .Where(m => wanted.EndsWith('-') ? m.StartsWith(wanted, StringComparison.Ordinal) : m == wanted)
+                .Order(StringComparer.Ordinal);
+            foreach (var name in matches)
+            {
+                if (replay.DrivenPages.Add(name))
+                {
+                    replay.Time.Now = at;
+                    await DriveEWalletPageAsync(replay, folder, name);
+                }
+            }
+        }
+    }
+
+    private static async Task DriveEWalletPageAsync(Replay replay, string folder, string name)
+    {
+        var dir = Path.Combine(SandboxRoot, folder);
+        var recorded = JsonNode.Parse(File.ReadAllText(Path.Combine(dir, name + ".meta.json")))!;
+        var htmlFile = Path.Combine(dir, name + ".html");
+        var html = File.Exists(htmlFile) ? File.ReadAllText(htmlFile) : string.Empty;
+        var expectedStatus = recorded["http_status"]!.GetValue<int>();
+        var isPayout = name.StartsWith("payout-", StringComparison.Ordinal);
+        var tid = replay.Created.Last(c => c.Type == (isPayout ? "payout" : "sale")).Tid;
+
+        string path;
+        var query = new Dictionary<string, string>();
+        if (isPayout)
+        {
+            path = $"pages/payout/{tid}";
+            expectedStatus = 200;
+        }
+        else if (name.EndsWith("redirect-page", StringComparison.Ordinal) || html.Contains("Please wait", StringComparison.Ordinal))
+        {
+            path = $"pages/apm-request/{tid}";
+        }
+        else if (name.StartsWith("apm-page-", StringComparison.Ordinal))
+        {
+            path = $"pages/apm/{tid}/response";
+            query["status"] = Regex.Match(recorded["url"]!.GetValue<string>(), @"status=(\w+)").Groups[1].Value;
+        }
+        else
+        {
+            path = $"pages/apm/{tid}";
+        }
+
+        var page = await replay.Emulator.HandleAsync(new EmulatorRequest
+        {
+            Environment = Environment, Path = path, Method = "GET", Query = query
+        });
+        Assert.That(page.StatusCode, Is.EqualTo(expectedStatus), $"{folder}: page {name} -> {path} answered {page.Body}");
+    }
+
     private static void AssertMatches(Step step, EmulatorReply reply, JsonNode actual)
     {
         var expected = step.Example["response"]!;
@@ -260,6 +369,7 @@ public class ExampleShapeTests
 
     private static IEnumerable<TestCaseData> Qa2Files() =>
         Directory.GetDirectories(Qa2Root).Order(StringComparer.Ordinal)
+            .Where(dir => !IsEWalletFolder(dir))
             .SelectMany(dir => Directory.GetFiles(dir, "*.json").Order(StringComparer.Ordinal))
             .Where(f => System.IO.Path.GetFileName(f) is var name && (name == "registration-response.json" || name.StartsWith("notification-", StringComparison.Ordinal)))
             .Select(f => System.IO.Path.GetRelativePath(Qa2Root, f))
@@ -347,6 +457,84 @@ public class ExampleShapeTests
             request = PraxisRequestBuilder.Sale(replay.Merchant, replay.Now, cvv, amount, notificationUrl);
         }
         return PraxisRequestBuilder.Request(Environment, "api/direct-process", request, Secret);
+    }
+
+    // ------------------------------------------------------------------ qa2 e-wallet
+
+    private static bool IsEWalletFolder(string dir) => System.IO.Path.GetFileName(dir).Contains("ewallet-", StringComparison.Ordinal);
+
+    private static IEnumerable<TestCaseData> Qa2EWalletFiles() =>
+        Directory.GetDirectories(Qa2Root).Where(IsEWalletFolder).Order(StringComparer.Ordinal)
+            .SelectMany(dir => Directory.GetFiles(dir, "*.json").Order(StringComparer.Ordinal))
+            .Where(f => System.IO.Path.GetFileName(f) is var name
+                        && (name == "deposit-response.json"
+                            || name.StartsWith("find-transaction-response-", StringComparison.Ordinal)
+                            || name.StartsWith("notification-", StringComparison.Ordinal)))
+            .Select(f => System.IO.Path.GetRelativePath(Qa2Root, f))
+            .Select(f => new TestCaseData(f).SetName($"Qa2EWallet_{f.Replace('\\', '/')}"));
+
+    /// <summary>
+    /// The qa2 e-wallet files by key set: BillingServer's <c>deposit-request.json</c> (fresh timestamp and signature)
+    /// is sent to <c>direct/apm</c>, the folder's outcome is driven on the page (approve -> wallet; decline,
+    /// cancelled, timeouts -> no wallet), then find-transaction runs. <c>deposit-response.json</c> and
+    /// <c>notification-1.json</c> are raw Praxis bodies and must match exactly. <c>find-transaction-response-*.json</c>
+    /// are BillingServer re-serializations (its <c>PraxisTransaction</c> model: no <c>edited_by</c>,
+    /// <c>withdrawal_request_id</c>, <c>is_3d</c>, and an <c>is_async</c> it writes even when Praxis omits it), so
+    /// every key of the file except <c>transaction.is_async</c> must be present in the emulator's reply.
+    /// </summary>
+    [TestCaseSource(nameof(Qa2EWalletFiles))]
+    public async Task Qa2EWalletExample_HasTheEmulatorKeySet(string file)
+    {
+        var expected = JsonNode.Parse(File.ReadAllText(Path.Combine(Qa2Root, file)))!;
+        var folder = System.IO.Path.GetDirectoryName(file)!;
+        var name = System.IO.Path.GetFileName(file);
+        var replay = new Replay();
+
+        var request = JsonNode.Parse(File.ReadAllText(Path.Combine(Qa2Root, folder, "deposit-request.json")))!.AsObject();
+        request["timestamp"] = replay.Now;
+        var deposit = await replay.Emulator.HandleAsync(PraxisRequestBuilder.Request(Environment, "direct/apm", request, Secret));
+        var depositResponse = deposit.Json()!;
+        Assert.That(PraxisSigner.Text(depositResponse, "status"), Is.EqualTo("0"), $"{folder}: {deposit.Body}");
+        var tid = depositResponse["transaction"]!["tid"]!.GetValue<long>();
+
+        var (button, timesOut) = folder switch
+        {
+            _ when folder.EndsWith("-approve", StringComparison.Ordinal) || folder.EndsWith("-no-notification", StringComparison.Ordinal) => ("approved", false),
+            _ when folder.EndsWith("-decline", StringComparison.Ordinal) => ("declined", false),
+            _ when folder.EndsWith("-cancelled", StringComparison.Ordinal) => ("cancelled", false),
+            _ when folder.EndsWith("-pending", StringComparison.Ordinal) => ("pending", true),
+            _ => ((string?)null, true)
+        };
+        if (button is not null)
+        {
+            var pressed = await replay.Emulator.HandleAsync(new EmulatorRequest
+            {
+                Environment = Environment, Path = $"pages/apm/{tid}/response", Method = "GET",
+                Query = new Dictionary<string, string> { ["status"] = button }
+            });
+            Assert.That(pressed.StatusCode, Is.EqualTo(302), $"{folder}: {button}");
+        }
+        if (timesOut)
+        {
+            replay.Time.Advance(PraxisEWalletCases.PageTimeout + TimeSpan.FromSeconds(1));
+        }
+        var find = (await replay.Emulator.HandleAsync(PraxisRequestBuilder.Request(Environment, "agent/find-transaction",
+            PraxisRequestBuilder.Find(replay.Merchant, replay.Now, tid), Secret))).Json()!;
+
+        if (name == "deposit-response.json")
+        {
+            AssertSameKeys(expected, depositResponse, file);
+        }
+        else if (name.StartsWith("notification-", StringComparison.Ordinal))
+        {
+            Assert.That(replay.Delivery.Jobs, Is.Not.Empty, $"{folder}: no notification");
+            AssertSameKeys(expected, JsonNode.Parse(replay.Delivery.Jobs[0].Body!)!, file);
+        }
+        else
+        {
+            var missing = Keys(expected).Where(k => k != "transaction.is_async").Except(Keys(find)).ToList();
+            Assert.That(missing, Is.Empty, $"{file}: keys BillingServer reads are missing. Actual body: {find.ToJsonString()}");
+        }
     }
 
     // ------------------------------------------------------------------ helpers

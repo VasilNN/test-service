@@ -5,14 +5,17 @@ namespace TestService.Api.Emulators.Transactions;
 
 /// <summary>
 /// The result a transition writes onto the transaction. <see cref="FinalAmount"/> replaces the
-/// transaction amount; <see cref="ProcessedAmount"/> overrides the processed amount of a
-/// transition that sets one (approve, pending, authorize), which otherwise is the requested amount.
+/// transaction amount; <see cref="ProcessedAmount"/> and <see cref="ProcessedCurrency"/> override the
+/// processed values of a transition that sets them (approve, pending, authorize), which otherwise are
+/// the requested amount and the transaction currency.
 /// </summary>
 public sealed record StatusChange(string Code, string Details, string SessionStatus)
 {
     public long? FinalAmount { get; init; }
 
     public long? ProcessedAmount { get; init; }
+
+    public string? ProcessedCurrency { get; init; }
 }
 
 /// <summary>A pending timed follow-up: at <see cref="DueAt"/> the follow-up named <see cref="FollowUp"/> is applied.</summary>
@@ -65,6 +68,7 @@ public class EmulatedTransaction
         [nameof(Authorize)] = [TransactionStatus.Initialized],
         [nameof(PartiallyApprove)] = [TransactionStatus.Initialized],
         [nameof(RequestVerification)] = [TransactionStatus.Initialized, TransactionStatus.Approved],
+        [nameof(Cancel)] = [TransactionStatus.Initialized, TransactionStatus.Pending],
         [nameof(SetDeadline)] = [TransactionStatus.Initialized, TransactionStatus.Pending],
         [nameof(SetStatusCheckFollowUp)] = [TransactionStatus.Pending]
     };
@@ -189,8 +193,11 @@ public class EmulatedTransaction
     /// <summary>The value of a provider field, or null.</summary>
     public string? Data(string key) => ProviderData.TryGetValue(key, out var value) ? value : null;
 
-    /// <summary>Stays <c>initialized</c> while the customer authenticates; the deadline applies when nobody decides.</summary>
-    public void AwaitAuthentication(StatusChange change, TransactionDeadline deadline, DateTime now)
+    /// <summary>
+    /// Stays <c>initialized</c> while the customer authenticates (or a redirect page is shown); the deadline,
+    /// if any, applies when nobody decides. Without a deadline the transaction stays initialized.
+    /// </summary>
+    public void AwaitAuthentication(StatusChange change, TransactionDeadline? deadline, DateTime now)
     {
         Transition(nameof(AwaitAuthentication), TransactionStatus.Initialized, change, keepsProcessed: false, now);
         Deadline = deadline;
@@ -216,6 +223,10 @@ public class EmulatedTransaction
 
     public void RequestVerification(StatusChange change, DateTime now) =>
         Transition(nameof(RequestVerification), TransactionStatus.Verification, change, keepsProcessed: false, now);
+
+    /// <summary>The customer cancelled (e-wallet page); only an open (initialized or pending) transaction can be cancelled.</summary>
+    public void Cancel(StatusChange change, DateTime now) =>
+        Transition(nameof(Cancel), TransactionStatus.Cancelled, change, keepsProcessed: false, now);
 
     /// <summary>Schedules a timed follow-up; only an open (initialized or pending) transaction can have one.</summary>
     public void SetDeadline(TransactionDeadline deadline)
@@ -294,7 +305,7 @@ public class EmulatedTransaction
 
         if (keepsProcessed)
         {
-            ProcessedCurrency = Currency;
+            ProcessedCurrency = change.ProcessedCurrency ?? Currency;
             ProcessedAmount = change.ProcessedAmount ?? RequestedAmount;
         }
         else

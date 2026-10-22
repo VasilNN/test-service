@@ -41,7 +41,9 @@ public class MongoTransactionRepository : ITransactionRepository
                     .Ascending("deadline.dueAt"),
                     new CreateIndexOptions { Sparse = true }),
                 new CreateIndexModel<EmulatedTransaction>(Builders<EmulatedTransaction>.IndexKeys
-                    .Ascending(x => x.Environment).Ascending(x => x.MerchantId).Ascending("providerData.card_token"))
+                    .Ascending(x => x.Environment).Ascending(x => x.MerchantId).Ascending("providerData.card_token")),
+                new CreateIndexModel<EmulatedTransaction>(Builders<EmulatedTransaction>.IndexKeys
+                    .Ascending(x => x.Environment).Ascending(x => x.MerchantId).Ascending("providerData.wallet_token"))
             ]);
         }
         catch (Exception ex)
@@ -116,6 +118,13 @@ public class MongoTransactionRepository : ITransactionRepository
         await _transactions.Find(Builders<EmulatedTransaction>.Filter.Eq(x => x.Environment, environment)
                 & Builders<EmulatedTransaction>.Filter.Eq(x => x.MerchantId, merchantId)
                 & Builders<EmulatedTransaction>.Filter.Eq("providerData.card_token", cardToken))
+            .SortByDescending(x => x.CreatedAt)
+            .FirstOrDefaultAsync();
+
+    public async Task<EmulatedTransaction?> FindByWalletTokenAsync(string environment, string merchantId, string walletToken) =>
+        await _transactions.Find(Builders<EmulatedTransaction>.Filter.Eq(x => x.Environment, environment)
+                & Builders<EmulatedTransaction>.Filter.Eq(x => x.MerchantId, merchantId)
+                & Builders<EmulatedTransaction>.Filter.Eq("providerData.wallet_token", walletToken))
             .SortByDescending(x => x.CreatedAt)
             .FirstOrDefaultAsync();
 

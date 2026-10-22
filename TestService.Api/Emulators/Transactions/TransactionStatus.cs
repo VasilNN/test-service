@@ -14,7 +14,8 @@ public enum TransactionStatus
     Error,
     Authorized,
     PartialApproved,
-    Verification
+    Verification,
+    Cancelled
 }
 
 public static class TransactionStatusNames
@@ -30,6 +31,7 @@ public static class TransactionStatusNames
         TransactionStatus.Authorized => "authorized",
         TransactionStatus.PartialApproved => "partial_approved",
         TransactionStatus.Verification => "verification",
+        TransactionStatus.Cancelled => "cancelled",
         _ => throw new ArgumentOutOfRangeException(nameof(status), status, null)
     };
 }

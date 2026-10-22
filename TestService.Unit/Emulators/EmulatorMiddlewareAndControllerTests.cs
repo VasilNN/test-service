@@ -334,6 +334,7 @@ public class EmulatorsControllerTests
         public Task<IReadOnlyList<EmulatedTransaction>> QueryAsync(string? environment, string? orderId, long? tid, int limit = 1000) => throw Boom;
         public Task<IReadOnlyList<EmulatedTransaction>> GetDueAsync(DateTime now, int limit = 100) => throw Boom;
         public Task<EmulatedTransaction?> FindByCardTokenAsync(string environment, string merchantId, string cardToken) => throw Boom;
+        public Task<EmulatedTransaction?> FindByWalletTokenAsync(string environment, string merchantId, string walletToken) => throw Boom;
     }
 
     [Test]

@@ -16,15 +16,16 @@ namespace TestService.Api.Emulators.Praxis;
 /// (<c>api/direct-process</c>, <c>direct/refund</c>, <c>agent/find-transaction</c>,
 /// <c>agent/manage-transaction</c>), the 3DS page, deadlines and signed notifications sent
 /// through <see cref="ICallbackDelivery"/>. Every rejection is HTTP 200 with a Praxis status, as Praxis does.
+/// The e-wallet endpoints and pages live in <c>PraxisEmulator.EWallet.cs</c>.
 /// </summary>
-public class PraxisEmulator : IProviderEmulator
+public partial class PraxisEmulator : IProviderEmulator
 {
     public const string ProviderName = "praxis";
     public const int MaxTimestampAgeSeconds = 60;
     private const int MaxSaveAttempts = 5;
 
-    private const string DefaultCardProcessor = "Test Card Processor";
-    private const string DefaultCardMethod = "Credit Card";
+    private const string DefaultCardProcessor = PraxisGatewayCatalog.DefaultCardProcessor;
+    private const string DefaultCardMethod = PraxisGatewayCatalog.DefaultCardMethod;
 
     private static readonly (string Path, string Name)[] SaleCustomerFields =
     [
@@ -80,6 +81,11 @@ public class PraxisEmulator : IProviderEmulator
                 return await FindTransactionAsync(request);
             case "agent/manage-transaction" when isPost:
                 return await ManageTransactionAsync(request);
+        }
+
+        if (await HandleEWalletAsync(request, path, segments, isPost, isGet) is { } ewallet)
+        {
+            return ewallet;
         }
 
         if (segments.Length >= 3 && segments[0] == "pages" && segments[1] == "3ds" && long.TryParse(segments[2], out var tid))
@@ -236,6 +242,11 @@ public class PraxisEmulator : IProviderEmulator
         if (reference is null)
         {
             return Reply(Error(401, "Wrong credentials"));
+        }
+        if (IsEWallet(reference))
+        {
+            // The Test E-Wallet gateway refunds nothing; the reply is signed, as captured (two spaces, as Praxis).
+            return Signed(Error(1, "Gateway for reference_id  does not allow refunding"), merchant!);
         }
 
         var now = Now;
@@ -648,13 +659,14 @@ public class PraxisEmulator : IProviderEmulator
 
     // ------------------------------------------------------------------ transaction data
 
-    private static void FillSession(EmulatedTransaction tx, JsonNode? body, PraxisMerchant merchant, string? fallbackGateway = null)
+    private static void FillSession(EmulatedTransaction tx, JsonNode? body, PraxisMerchant merchant, string? fallbackGateway = null,
+        string defaultProcessor = DefaultCardProcessor, string defaultMethod = DefaultCardMethod)
     {
         var gatewayId = NullIfEmpty(Text(body, "gateway")) ?? fallbackGateway;
         var gateway = merchant.Gateways.FirstOrDefault(g => g.Id == gatewayId);
         tx.ProviderData[Keys.Gateway] = gatewayId;
-        tx.ProviderData[Keys.PaymentProcessor] = NullIfEmpty(gateway?.PaymentProcessor) ?? tx.Data(Keys.PaymentProcessor) ?? DefaultCardProcessor;
-        tx.ProviderData[Keys.PaymentMethod] = NullIfEmpty(gateway?.PaymentMethod) ?? tx.Data(Keys.PaymentMethod) ?? DefaultCardMethod;
+        tx.ProviderData[Keys.PaymentProcessor] = NullIfEmpty(gateway?.PaymentProcessor) ?? tx.Data(Keys.PaymentProcessor) ?? defaultProcessor;
+        tx.ProviderData[Keys.PaymentMethod] = NullIfEmpty(gateway?.PaymentMethod) ?? tx.Data(Keys.PaymentMethod) ?? defaultMethod;
         tx.ProviderData[Keys.Cid] = NullIfEmpty(Text(body, "cid"));
         tx.ProviderData[Keys.AuthToken] = Guid.NewGuid().ToString("N");
         tx.ProviderData[Keys.Variable1] = NullIfEmpty(Text(body, "variable1"));

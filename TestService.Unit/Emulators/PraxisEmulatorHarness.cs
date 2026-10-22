@@ -35,7 +35,11 @@ public sealed class PraxisEmulatorHarness
         MerchantId = merchantId,
         ApplicationKey = "app-" + merchantId,
         Secret = "secret-" + merchantId,
-        Gateways = [new PraxisGateway { Id = PraxisRequestBuilder.CardGateway, Kind = "card", PaymentProcessor = "Test Card Processor", PaymentMethod = "Credit Card" }],
+        Gateways =
+        [
+            new PraxisGateway { Id = PraxisRequestBuilder.CardGateway, Kind = "card", PaymentProcessor = "Test Card Processor", PaymentMethod = "Credit Card" },
+            new PraxisGateway { Id = PraxisRequestBuilder.EWalletGateway, Kind = "ewallet", PaymentProcessor = "Test E-Wallet", PaymentMethod = "altbankwire" }
+        ],
         TimeScale = timeScale
     };
 
@@ -79,6 +83,21 @@ public sealed class PraxisEmulatorHarness
         Method = "POST",
         Query = new Dictionary<string, string> { ["status"] = status },
         Form = errorCode is null ? new Dictionary<string, string>() : new Dictionary<string, string> { ["error_code"] = errorCode },
+        BaseUrl = "http://emulator.test"
+    });
+
+    /// <summary>A `direct/apm` request (sale or payout) as the sandbox captures send it.</summary>
+    public Task<EmulatorReply> ApmAsync(string transactionType, long amount, JsonObject? walletData = null,
+        string? notificationUrl = NotificationUrl, string? returnUrl = ReturnUrl, PraxisMerchant? merchant = null) =>
+        SendAsync("direct/apm", PraxisRequestBuilder.Apm(merchant ?? Merchant, Now, transactionType, amount, notificationUrl, returnUrl, walletData), merchant);
+
+    /// <summary>A GET of an emulator page (`pages/...`).</summary>
+    public Task<EmulatorReply> GetPageAsync(string path, string? status = null) => Emulator.HandleAsync(new EmulatorRequest
+    {
+        Environment = Env,
+        Path = path,
+        Method = "GET",
+        Query = status is null ? new Dictionary<string, string>() : new Dictionary<string, string> { ["status"] = status },
         BaseUrl = "http://emulator.test"
     });
 
