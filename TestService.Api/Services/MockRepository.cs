@@ -1,3 +1,4 @@
+using System.Runtime.CompilerServices;
 using MongoDB.Driver;
 using TestService.Api.Configuration;
 using TestService.Api.Models;
@@ -17,9 +18,18 @@ public interface IMockRepository
     Task<IEnumerable<MockRequestLog>> GetRequestLogsAsync(string? environment = null, string? path = null, int limit = 100, bool? matched = null);
     Task<long> DeleteRequestLogsAsync(string? environment = null);
 
+    /// <summary>Every request log of the environment (all environments when blank), unbounded, streamed from a cursor.</summary>
+    IAsyncEnumerable<MockRequestLog> StreamRequestLogsAsync(string? environment, CancellationToken ct = default);
+
+    /// <summary>Deletes request logs whose <c>timestamp</c> is before <paramref name="cutoffUtc"/>.</summary>
+    Task<long> DeleteRequestLogsOlderThanAsync(DateTime cutoffUtc);
+
     Task CreateCallbackLogAsync(MockCallbackLog callbackLog);
     Task<IEnumerable<MockCallbackLog>> GetCallbackLogsAsync(string? environment = null, string? source = null, string? correlationId = null, int limit = 100);
     Task<long> DeleteCallbackLogsAsync(string? environment = null);
+
+    /// <summary>Deletes callback logs whose <c>sentAt</c> is before <paramref name="cutoffUtc"/>.</summary>
+    Task<long> DeleteCallbackLogsOlderThanAsync(DateTime cutoffUtc);
 }
 
 public class MockRepository : IMockRepository
@@ -193,6 +203,33 @@ public class MockRepository : IMockRepository
         return result.DeletedCount;
     }
 
+    public async IAsyncEnumerable<MockRequestLog> StreamRequestLogsAsync(
+        string? environment,
+        [EnumeratorCancellation] CancellationToken ct = default)
+    {
+        var filter = Builders<MockRequestLog>.Filter.Empty;
+        if (!string.IsNullOrWhiteSpace(environment))
+        {
+            filter = Builders<MockRequestLog>.Filter.Eq(x => x.Environment, environment);
+        }
+
+        using var cursor = await _logsCollection.Find(filter).ToCursorAsync(ct);
+        while (await cursor.MoveNextAsync(ct))
+        {
+            foreach (var log in cursor.Current)
+            {
+                yield return log;
+            }
+        }
+    }
+
+    public async Task<long> DeleteRequestLogsOlderThanAsync(DateTime cutoffUtc)
+    {
+        var filter = Builders<MockRequestLog>.Filter.Lt(x => x.Timestamp, cutoffUtc);
+        var result = await _logsCollection.DeleteManyAsync(filter);
+        return result.DeletedCount;
+    }
+
     public async Task CreateCallbackLogAsync(MockCallbackLog callbackLog)
     {
         await _callbackLogsCollection.InsertOneAsync(callbackLog);
@@ -231,6 +268,13 @@ public class MockRepository : IMockRepository
             filter = Builders<MockCallbackLog>.Filter.Eq(x => x.Environment, environment);
         }
 
+        var result = await _callbackLogsCollection.DeleteManyAsync(filter);
+        return result.DeletedCount;
+    }
+
+    public async Task<long> DeleteCallbackLogsOlderThanAsync(DateTime cutoffUtc)
+    {
+        var filter = Builders<MockCallbackLog>.Filter.Lt(x => x.SentAt, cutoffUtc);
         var result = await _callbackLogsCollection.DeleteManyAsync(filter);
         return result.DeletedCount;
     }

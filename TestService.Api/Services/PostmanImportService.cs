@@ -92,7 +92,8 @@ public class PostmanImportService : IPostmanImportService
         var status = 200;
         var responseBody = "";
         var responseHeaders = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
-        if (requestEl.TryGetProperty("response", out var responseArr) && responseArr.ValueKind == JsonValueKind.Array)
+        // Collection v2.1: saved responses are a sibling of "request" on the item.
+        if (item.TryGetProperty("response", out var responseArr) && responseArr.ValueKind == JsonValueKind.Array)
         {
             var first = responseArr.EnumerateArray().FirstOrDefault();
             if (first.ValueKind != JsonValueKind.Undefined)

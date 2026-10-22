@@ -30,6 +30,10 @@ public class MocksController : ControllerBase
             var created = await _mockService.CreateExpectationAsync(expectation);
             return CreatedAtAction(nameof(GetExpectations), new { environment = created.Environment }, created);
         }
+        catch (MockExpectationValidationException ex)
+        {
+            return BadRequest(new { message = ex.Message });
+        }
         catch (Exception ex)
         {
             _logger.LogError(ex, "Error creating mock expectation");
@@ -67,6 +71,10 @@ public class MocksController : ControllerBase
                 return NotFound();
             }
             return NoContent();
+        }
+        catch (MockExpectationValidationException ex)
+        {
+            return BadRequest(new { message = ex.Message });
         }
         catch (Exception ex)
         {
@@ -285,6 +293,10 @@ public class MocksController : ControllerBase
 
             var created = await _mockService.CreateExpectationAsync(clone);
             return Ok(created);
+        }
+        catch (MockExpectationValidationException ex)
+        {
+            return BadRequest(new { message = ex.Message });
         }
         catch (Exception ex)
         {

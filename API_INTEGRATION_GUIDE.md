@@ -803,6 +803,20 @@ Every attempt is one entry in the callback log (MongoDB collection `MockCallback
 { "deletedCount": 3 }
 ```
 
+### 7.4 Regex Patterns, Verification and Log Retention
+**Regex patterns.** When `requestMatcher.pathMatchType` is `Regex` (path) or `requestMatcher.bodyMatchType` is `Regex` (body), the pattern is compiled when the expectation is created, updated or duplicated. An invalid pattern is rejected and nothing is stored:
+
+```json
+HTTP 400
+{ "message": "requestMatcher.path is not a valid regular expression: Invalid pattern '/(' at offset 2. Not enough )'s." }
+```
+
+At match time each regex evaluation is limited to 100 ms; a pattern that runs longer counts as no match for that expectation (and for verification) and a warning naming the expectation is logged.
+
+**Verification.** `POST /api/mocks/verify` counts every logged request of the environment that matches, however many there are, with the same rules as live `/mock/*` requests: `query` is matched against the logged query string and header names are case-insensitive.
+
+**Log retention.** Setting `dataRetention.mockLogRetentionDays` (`GET`/`PUT /api/settings`, default `7`, `null` keeps logs forever) applies to both mock request logs (by `timestamp`) and callback logs (by `sentAt`). The hourly cleanup deletes entries older than that while `dataRetention.autoCleanupEnabled` is `true`. Settings stored before this field existed read as `7`. Mock expectations and logs are never touched by entity retention.
+
 ---
 
 ## 8. Data Models
