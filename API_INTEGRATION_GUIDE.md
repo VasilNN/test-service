@@ -15,7 +15,7 @@
 4. [Environments](#4-environments)
 5. [Settings & API Keys](#5-settings--api-keys)
 6. [Users](#6-users)
-7. [Mocks (Import, Duplicate & Callbacks)](#7-mocks-import-duplicate--callbacks)
+7. [Mocks (Import, Duplicate, Callbacks & Praxis Emulator)](#7-mocks-import-duplicate-callbacks--praxis-emulator)
 8. [Data Models](#8-data-models)
 9. [Error Handling](#9-error-handling)
 10. [Integration Examples](#10-integration-examples)
@@ -695,7 +695,7 @@ Returns created API key with generated key value.
 
 ---
 
-## 7. Mocks (Import, Duplicate & Callbacks)
+## 7. Mocks (Import, Duplicate, Callbacks & Praxis Emulator)
 
 ### 7.1 Import from Postman Collection
 **Endpoint:** `POST /api/mocks/expectations/import/postman?targetEnvironment={env}&pathPrefix={prefix}`  
@@ -730,7 +730,7 @@ Returns created API key with generated key value.
 Returns the newly created mock expectation (same structure as a single expectation). The name is suffixed with ` ({targetEnvironment})`.
 
 ### 7.3 Outbound Callbacks and the Callback Log
-Callback delivery is the component provider emulators use to send delayed outbound requests, such as signed payment notifications, to a merchant's callback URL. No producer uses it yet: the Praxis emulator, coming next, will be the first. A producer builds each request completely and a background dispatcher sends it unchanged at its due time. There are no retries, and requests still pending when the service stops are not resent.
+Callback delivery is the component provider emulators use to send delayed outbound requests, such as signed payment notifications, to a merchant's callback URL. Its producer is the Praxis emulator (§7.5), which sends its signed notifications through it. A producer builds each request completely and a background dispatcher sends it unchanged at its due time. There are no retries, and requests still pending when the service stops are not resent.
 
 **Allowed hosts.** A callback is sent only if its URL host is listed in `Mocking:AllowedCallbackHosts` (exact, case-insensitive host match; the port is ignored). An empty list means nothing is sent. Defaults: `localhost` in Development and Docker, nothing in `appsettings.json` and Production. Set it with environment variables, one per index:
 
@@ -816,6 +816,138 @@ At match time each regex evaluation is limited to 100 ms; a pattern that runs lo
 **Verification.** `POST /api/mocks/verify` counts every logged request of the environment that matches, however many there are, with the same rules as live `/mock/*` requests: `query` is matched against the logged query string and header names are case-insensitive.
 
 **Log retention.** Setting `dataRetention.mockLogRetentionDays` (`GET`/`PUT /api/settings`, default `7`, `null` keeps logs forever) applies to both mock request logs (by `timestamp`) and callback logs (by `sentAt`). The hourly cleanup deletes entries older than that while `dataRetention.autoCleanupEnabled` is `true`. Settings stored before this field existed read as `7`. Mock expectations and logs are never touched by entity retention.
+
+### 7.5 Praxis Emulator
+A self-contained Praxis emulator lives at `/emulators/praxis/{environment}/<Praxis path>`, so BillingServer only changes its Praxis base URLs. It behaves like the Praxis sandbox "Test Card Processor" for every documented test case of https://docs.praxis.tech/docs/testing that the API can express (corrected by redacted sandbox captures where they differ): signed requests and responses, encrypted card data, state across calls (find-transaction, capture, refund of an earlier sale), a 3DS simulation page and delayed signed notifications sent through callback delivery (§7.3). test-service never calls a Praxis host. E-wallet flows are not emulated yet.
+
+The emulator is anonymous like `/mock/*`, and it answers only for environments that have at least one registered merchant. Any other path answers HTTP 404 with a JSON `message` and stores nothing (also for an unknown provider, for example `/emulators/other/...`).
+
+#### 7.5.1 Merchants
+| Endpoint | Authorization | Result |
+|---|---|---|
+| `GET /api/emulators/praxis/merchants?environment={env}` | `mocks.read` | Merchants (all environments when `environment` is omitted) |
+| `POST /api/emulators/praxis/merchants` | `mocks.write` | 201 with the merchant; 400 `{ message }` when invalid; 409 when `environment` + `merchantId` exists |
+| `PUT /api/emulators/praxis/merchants/{id}` | `mocks.write` | 200 with the merchant; 404 unknown id; 400; 409. Without `secret`, the stored secret is kept |
+| `DELETE /api/emulators/praxis/merchants/{id}` | `mocks.write` | 204; 404 unknown id |
+
+```json
+{
+  "environment": "qa2",
+  "merchantId": "<BillingServer merchant id>",
+  "applicationKey": "<BillingServer application key>",
+  "secret": "<BillingServer gateway password>",
+  "gateways": [
+    { "id": "040e154f306f145b84208512d00ef8d9", "kind": "card", "paymentProcessor": "Test Card Processor", "paymentMethod": "Credit Card" }
+  ],
+  "dropNotifications": false,
+  "timeScale": 1.0
+}
+```
+
+| Field | Rules |
+|---|---|
+| `environment` | Required; the `{environment}` path segment |
+| `merchantId` | Required; unique per environment; must equal the request's `merchant_id` |
+| `applicationKey` | Required; must equal the request's `application_key` |
+| `secret` | Required on create, at most 32 characters (it is the AES-256 key, left-padded with `0`); write-only: responses carry `secretLength` instead |
+| `gateways` | At least one `{ id, kind: card\|ewallet, paymentProcessor, paymentMethod }`. A request's `gateway` that is not registered is accepted; processor and method then default to `Test Card Processor` / `Credit Card` |
+| `dropNotifications` | Default `false`; `true` sends no notifications for this merchant |
+| `timeScale` | Number >= 0, default `1.0`; multiplies every emulator delay (notification delays, 3DS and pending timeouts). Tests use `0` (everything immediate) or a small positive value when they need the 3DS page |
+
+#### 7.5.2 Endpoints, Signatures and Rejections
+| Praxis endpoint | Path under `/emulators/praxis/{env}/` |
+|---|---|
+| Card sale or payout | `POST api/direct-process` (`transaction_type` `sale` or `payout`; a payout may send `card_token` + `customer_token` of an earlier sale instead of `card_data`) |
+| Card refund | `POST direct/refund` (`reference_id` = tid of the sale) |
+| Find transaction | `POST agent/find-transaction` |
+| Capture / cancel an authorized sale | `POST agent/manage-transaction` with `intent` `capture-authorization` or `cancel-authorization` |
+| 3DS page (the sale's `redirect_url`) | `GET pages/3ds/{tid}`; its buttons POST `error_code` to `pages/3ds/{tid}/submit?status=approved\|declined\|pending\|verification`, which redirects (302) to the sale's `return_url` |
+
+**Request signature.** Header `GT-Authentication` = lowercase hex SHA-384 of the concatenated fields followed by the secret (a null or missing field is empty, a number is its JSON text):
+
+| Endpoint | Fields |
+|---|---|
+| `api/direct-process` | `merchant_id, application_key, timestamp, transaction_type, cid, order_id, currency, amount, gateway, notification_url, return_url`, then `card_token` or else `card_data.card_number` (the cipher text) |
+| `direct/refund` | `merchant_id, application_key, timestamp, transaction_type, cid, order_id, currency, amount, reference_id, withdrawal_request_id` |
+| `agent/find-transaction` | `merchant_id, application_key, timestamp, tid` |
+| `agent/manage-transaction` | `merchant_id, application_key, timestamp, intent, tid` |
+
+**Card data.** `card_number`, `card_exp` (`MM/YYYY`) and `cvv` are AES-256-CBC, PKCS7, Base64; key = secret left-padded with `0` to 32 bytes, IV = the request `timestamp` left-padded with `0` to 16 bytes.
+
+**Response and notification signatures.** Every successful (`status 0`) response carries `GT-Authentication` = SHA-384 of `status, timestamp, customer.customer_token, transaction.tid, transaction.transaction_status, transaction.processed_currency, transaction.processed_amount` + secret. Notifications are POSTed as JSON to the request's `notification_url` with `GT-Authentication` = SHA-384 of `merchant_id, application_key, timestamp, customer.customer_token, session.order_id, transaction.tid, transaction.currency, transaction.amount, transaction.conversion_rate, transaction.processed_currency, transaction.processed_amount` + secret. The merchant's reply is only logged: read it with `GET /api/mocks/callbacks?source=praxis&correlationId={tid}` (§7.3). The notification host must be listed in `Mocking:AllowedCallbackHosts`.
+
+Bodies have the key sets of the captured Praxis responses (`transaction.amount` is the final amount, `processed_amount` the requested one); find-transaction carries `is_3d`, the other bodies `is_async`; manage-transaction answers only `status, description, transaction, version, timestamp`.
+
+**Rejections** are HTTP 200 without a signature header, checked in this order:
+
+| Check | Body |
+|---|---|
+| Unknown merchant or application key (in this environment), empty or invalid body | `{"status":401,"description":"User not found"}` |
+| Wrong signature | `{"status":1,"description":"Validation Error","errors":{"merchant_id":["Invalid signature"]}}` |
+| Timestamp older than 60 s on `agent/*` | `{"status":1,"description":"Validation Error","errors":{"timestamp":["Timestamp expired: 130s old, should be at most 60s old (required with merchant_id)"]}}` |
+| Blank fields, decrypt failures and, last, an expired timestamp on `api/direct-process` / `direct/refund` | `{"status":400,"description":"City cannot be blank.,Address cannot be blank.,..."}` (a sale needs `customer_data.city`, `customer_data.address` and `device_data.user_agent, accept_header, language, ip_address, color_depth, pixel_depth, pixel_ratio`; `Failed to decrypt card_number`, `card_exp`, `cvv`; `Reference Id cannot be blank.`) |
+| Missing `timestamp` on `agent/*` | `{"status":1,"description":"Validation Error","errors":{"timestamp":["Timestamp cannot be blank."]}}` (on `api/direct-process` / `direct/refund`, `Timestamp cannot be blank.` is the last item of the `status 400` list) |
+| Non-integer `amount` on `api/direct-process` / `direct/refund` | `Amount must be an integer.` in the `status 400` list (after the blank fields) |
+| Missing `tid` (find, manage) | `{"status":400,"description":"Tid cannot be blank."}` |
+| Missing `intent` (manage) | `{"status":400,"description":"Intent cannot be blank."}` |
+| `transaction_type` other than `sale`/`payout` on `api/direct-process` | `{"status":1,"description":"Gateway does not support the transaction type (authorization)"}` |
+| Unknown tid, or a tid / `reference_id` of another merchant | `{"status":401,"description":"Wrong credentials"}` |
+| Capture or cancel of a transaction that is not authorized, unknown intent | `{"status":1,"description":"Generic Error"}` |
+
+The 3DS page answers with real HTTP statuses and a JSON `message`: `GET`/submit of an unknown tid (or one of another environment) 404; a transaction no longer awaiting 3DS (already decided, timed out, or not a 3DS sale) 409, including a second submit; submit with an unknown `status` 400.
+
+#### 7.5.3 Transactions (for test assertions)
+**Endpoint:** `GET /api/emulators/praxis/transactions?environment={env}&orderId={orderId}&tid={tid}`  
+**Authorization:** Bearer Token Required (`mocks.read`)  
+**Description:** Emulated transactions (MongoDB collection `PraxisTransactions`), newest first, at most 1000; every filter is optional. Each item has `tid`, `environment`, `merchantId`, `transactionType`, `orderId`, `currency`, `requestedAmount`, `amount`, `processedAmount`, `status` (wire name, for example `partial_approved`), `statusCode`, `statusDetails`, `sessionStatus`, `caseName`, `history` (one entry per transition), the pending `deadline` and the Praxis `providerData` (customer and card fields).
+
+#### 7.5.4 Pointing BillingServer at the Emulator
+1. Register the merchant (§7.5.1) with BillingServer's merchant id, application key, gateway password (`secret`) and card gateway hash.
+2. Card gateway URLs: `<test-service>/emulators/praxis/<env>/api/direct-process` (sale, payout), `<test-service>/emulators/praxis/<env>/direct/refund`, and `<test-service>/emulators/praxis/<env>/` as the base BillingServer appends `agent/find-transaction` and `agent/manage-transaction` to.
+3. E-wallet `SiteUrl` (once e-wallet flows are emulated): `<test-service>/emulators/praxis/<env>/`.
+4. Allow BillingServer's notification host: `Mocking__AllowedCallbackHosts__0=<billing host>`.
+5. Lower `timeScale` to shorten the 15 s notification delay and the 540 s timeouts.
+
+#### 7.5.5 Test Cases (card, Test Card Processor)
+Amounts are in minor units (`4900` = 49.00). CVV other than the listed ones declines.
+
+| Trigger | First response | Then |
+|---|---|---|
+| CVV 568 | `approved`, `[TEST] Transaction status: approved` | approved notification |
+| CVV 000 / other | `rejected`, `[TEST] Transaction status: declined` | rejected notification |
+| CVV 353 | `partial_approved`, `[TEST] Transaction status: partial_approved. Reason: Notification with partial approved` | notification |
+| CVV 444 | `error`, `[TEST] Transaction status: error. Reason: Internal server error` | - |
+| CVV 555 | `authorized` | `capture-authorization` (amount 47 rejected, 48 error, other approved; `status_details` stays `[TEST] Transaction status: authorized`) or `cancel-authorization` (rejected, `Transaction status: Cancelled`) |
+| CVV 801 | `rejected`, `Insufficient funds`, `GE-006` | - |
+| CVV 900 / 901 / 902 / 903 / 904 / 905 | `rejected`: `Card has been lost` / `Card has been stolen` / `Declined due to fraud` / `Do not honor` / `Transaction declined` / `Transaction failed. Please contact our support team` (`GE-007`) | - |
+| CVV 333 or 300 | `initialized`, `[TEST] Transaction status: pending_async. Reason: 3DS authentication required`, code `530`, `redirect_url` to the 3DS page | Approve: `approved`, `Approved`. Pending: `pending`, `Transaction in progress.`, then `rejected`, `Transaction timed out. Old status pending. New status declined` after 540 s. Verification: `verification`, `Transaction set to verification status`. Decline: `rejected` with the chosen code (903 `Do not honor`, 906 `. Reason: Insufficient funds`, 904 `No status details`, 900 `Card has been lost`, 901 `Card has been  stolen`, 902 `Declined due to fraud`, 912 `Declined due to suspected-fraud`). Page never submitted: `rejected`, `Transaction timed out. Old status pending_async. New status declined` after 540 s. Each result notifies 15 s later |
+| CVV 333 + amount 334 | as 3DS | after Approve: `verification`, `[TEST] Transaction status: declined`; notifications `approved`, then `verification` 5 s later |
+| CVV 333 + amount 335 | as 3DS | after Approve: `verification`, amount 35000, `[TEST] Transaction status: approved`; notifications `approved` (33500), then `verification` (35000) 5 s later |
+| CVV 454 + amount 498 | as 3DS | after Approve: `approved`, amount 40000, `TEST amount 498, 3D partial approved with amount 400` |
+| CVV 588 + amount 713 | `initialized`, code `0`, no `redirect_url` | after 540 s `rejected`, `Transaction timed out. Old status pending_async. New status declined`, notification |
+| Amount 11 / 19 (CVV 568) | `approved`, amount 1000 / 2000 (processed 1100 / 1900), `[TEST CASE - amount 11] Changing final amount to 10` / `... 19] Changing final amount to 20` | - |
+| Amount 12 / 13 (CVV 568) | `approved`, `[TEST CASE - amount 12] Changing final currency` / `[TEST CASE - amount 13] Changing final currency and amount` (amount 2600); despite the text the currency stays the requested one, as the sandbox shows | - |
+| Amount 14 / 46 (CVV 568) | `approved`, amount x100 / x2 | - |
+| Amount 339 (CVV 568) | `approved` | - |
+| Amount 20.20 + CVV 801 | `approved` | - |
+| Amount 30 + CVV 801 | `pending` | `approved` on the next find-transaction, `[TEST CASE - amount 30.00] transaction status changed from pending to approved` |
+| Payout amount 14 / 46 | `approved`, x100 / x2 | - |
+| Payout amount 47 / 48 | `rejected` / `error` | - |
+| Payout amount 332 / 333 | `pending`, `[TEST] Transaction status: pending. Reason: Awaiting authorization` | stays pending (as the sandbox does) |
+| Payout other | `approved` | - |
+| Refund amount 47 / 48 | `rejected` / `error` | - |
+| Refund amount 332 / 333 | `pending`, `Awaiting authorization` | `rejected` / `approved` on the next find-transaction, `[TEST CASE - amount 332] transaction status changed from pending to rejected` (333: `... to approved`) |
+| Refund other | `approved` | - |
+
+Not emulated: amounts 0.011, 0.012 and 0.013 (the API takes integer minor units) and `transaction_type: authorization` (rejected, as the sandbox gateway does).
+
+#### 7.5.6 Emulator-Defined Behaviour
+These points have no Praxis source; the emulator fixes them:
+- **Trigger precedence:** CVV + amount rows, then amount rows (which apply with CVV 568), then CVV rows, then the default decline. A sale sent with `card_token` has no CVV and takes the default decline.
+- **Notifications:** 15 s after a state change that notifies (approved, declined and partial sales, every 3DS result and timeout; the 334/335 pairs 5 s apart). Payouts, refunds, captures, amount cases and status-check follow-ups send none. A notification's `timestamp` is its send time.
+- **Timeouts:** 540 s for an abandoned 3DS page, for 3DS Pending and for 588 + 713. A deadline is due when `now >= dueAt`; it is applied before every read or action on the transaction and by a background service every second, whichever saves first (optimistic versioning), so it is applied once.
+- **Ids and tokens:** tids are unique across environments, start at 1000000 and stay within int32; `customer_token` and `card_token` are derived from the merchant and the customer `cid` / card number; card fields are masked (`411111******1111`), typed by the first digit (`VISA`, `MASTERCARD`, `AMEX`) and issued by `EMULATOR TEST BANK`.
+- **Session status** follows the sandbox: `successful`, `failed`, `open` (pending, initialized, partial, 3DS verification) or `action required` (authorized, captured, cancelled).
 
 ---
 

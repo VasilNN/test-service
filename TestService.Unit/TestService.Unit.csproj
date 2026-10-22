@@ -27,6 +27,12 @@
   </ItemGroup>
 
   <ItemGroup>
+    <Compile Include="..\TestService.Tests\Praxis\InMemoryEmulatorStores.cs" Link="Emulators\InMemoryEmulatorStores.cs" />
+    <Compile Include="..\TestService.Tests\Praxis\PraxisRequestBuilder.cs" Link="Emulators\PraxisRequestBuilder.cs" />
+    <Compile Include="..\TestService.Tests\Praxis\EmulatorTestDoubles.cs" Link="Emulators\EmulatorTestDoubles.cs" />
+  </ItemGroup>
+
+  <ItemGroup>
     <ProjectReference Include="..\TestService.Api\TestService.Api.csproj" />
   </ItemGroup>
 
