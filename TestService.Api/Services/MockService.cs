@@ -305,7 +305,8 @@ public class MockService : IMockService
     }
 
     /// <summary>
-    /// Regex match limited to <see cref="MockExpectationValidator.RegexTimeout"/>; a timeout counts as no match.
+    /// Regex match limited to <see cref="MockExpectationValidator.RegexTimeout"/>; a timeout counts as no match, and so does
+    /// an invalid pattern (an expectation stored before patterns were validated, or a verification matcher).
     /// </summary>
     private bool IsRegexMatch(string input, string pattern, string label)
     {
@@ -320,6 +321,11 @@ public class MockService : IMockService
                 pattern,
                 label,
                 MockExpectationValidator.RegexTimeout.TotalMilliseconds);
+            return false;
+        }
+        catch (ArgumentException ex)
+        {
+            _logger.LogWarning("Regex {Pattern} of {Label} is invalid ({Error}); treated as no match", pattern, label, ex.Message);
             return false;
         }
     }

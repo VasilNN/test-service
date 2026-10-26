@@ -10,6 +10,15 @@ public interface IPostmanImportService
 
 public class PostmanImportService : IPostmanImportService
 {
+    /// <summary>
+    /// Saved-response headers that describe the recorded transfer, not the body the mock sends (which is re-encoded
+    /// and framed by the server): copying them would give a wrong length or a "gzip" label on a plain body.
+    /// </summary>
+    private static readonly HashSet<string> TransportHeaders = new(StringComparer.OrdinalIgnoreCase)
+    {
+        "Content-Length", "Content-Encoding", "Transfer-Encoding", "Connection"
+    };
+
     public IReadOnlyList<MockExpectation> ParseCollection(Stream stream, string targetEnvironment, string? pathPrefix = null)
     {
         using var doc = JsonDocument.Parse(stream);
@@ -108,7 +117,7 @@ public class PostmanImportService : IPostmanImportService
                     {
                         var key = h.TryGetProperty("key", out var k) ? k.GetString() : null;
                         var value = h.TryGetProperty("value", out var v) ? v.GetString() : null;
-                        if (!string.IsNullOrEmpty(key))
+                        if (!string.IsNullOrEmpty(key) && !TransportHeaders.Contains(key!))
                             responseHeaders[key!] = value ?? "";
                     }
                 }

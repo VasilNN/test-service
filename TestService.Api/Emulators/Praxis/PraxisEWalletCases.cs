@@ -21,11 +21,18 @@ public static class PraxisEWalletCases
     public static readonly TimeSpan CopyNotificationGap = TimeSpan.FromSeconds(5);
 
     public const string SaleCaseName = "apm-sale";
+
+    /// <summary>Deadline of a sale whose payment page was never opened: times out from <c>pending_async</c> [qa2].</summary>
     public const string PageAbandoned = "apm-page-abandoned";
+
+    /// <summary>Deadline of a sale whose buttons page was shown but never answered: times out from <c>pending</c> [sbx].</summary>
+    public const string PageOpenedAbandoned = "apm-page-opened-abandoned";
+
     public const string PendingTimeout = "apm-pending-timeout";
 
     public const string NoStatusDetails = "No status details";
     private const string TimedOut = "Transaction timed out. Old status pending. New status declined";
+    private const string TimedOutPendingAsync = "Transaction timed out. Old status pending_async. New status declined";
     private const string PayoutSuccess = "[TEST] Payout capture successfully";
 
     /// <summary>The page buttons, in page order.</summary>
@@ -60,7 +67,9 @@ public static class PraxisEWalletCases
             new NotifyCopyOutcome(new DeclineOutcome(Change("0", NoStatusDetails, "failed"), NotificationDelay + CopyNotificationGap)),
             new NotifyCopyOutcome(new ApproveOutcome(Change("0", NoStatusDetails, "successful")
                 with { FinalAmount = 13360, ProcessedAmount = 13360 }, NotificationDelay + CopyNotificationGap + CopyNotificationGap)),
-            new VerificationOutcome(Change("0", NoStatusDetails, "open") with { FinalAmount = 26720 }))),
+            // The session keeps the copies' 133.60 [sbx].
+            new VerificationOutcome(Change("0", NoStatusDetails, "open")
+                with { FinalAmount = 26720, SessionAmount = 13360, SessionProcessedAmount = 13360 }))),
         _ => null
     };
 
@@ -81,19 +90,24 @@ public static class PraxisEWalletCases
         IOutcome Approved(int trigger, string details, long final) => new ApproveOutcome(
             Change(trigger.ToString(), $"[TEST CASE - amount {trigger}] {details}", "successful") with { FinalAmount = final, ProcessedAmount = final },
             NotificationDelay);
-        IOutcome Verification(int trigger, string details, long final) => new VerificationOutcome(
-            Change(trigger.ToString(), $"[TEST CASE - amount {trigger}] {details}", "open") with { FinalAmount = final },
+        // The transaction's processed values are null; the session shows them [sbx].
+        IOutcome Verification(int trigger, string details, long final, long sessionProcessed, string? sessionCurrency = null,
+            string? conversionRate = null) => new VerificationOutcome(
+            Change(trigger.ToString(), $"[TEST CASE - amount {trigger}] {details}", "open") with
+            {
+                FinalAmount = final, SessionProcessedAmount = sessionProcessed, SessionProcessedCurrency = sessionCurrency, ConversionRate = conversionRate
+            },
             NotificationDelay);
 
         return amount switch
         {
             1100 => Approved(11, "Changing final amount to 10", 1000),
             1200 => new ApproveOutcome(Change("12", "[TEST CASE - amount 12] Changing final currency", "successful")
-                with { FinalAmount = 1068, ProcessedAmount = 1200, ProcessedCurrency = "USD" }, NotificationDelay),
-            1300 => Verification(13, "Changing final currency and amount", 1625),
-            1400 => Verification(14, "Changing final amount to x100", amount * 100),
+                with { FinalAmount = 1068, ProcessedAmount = 1200, ProcessedCurrency = "USD", ConversionRate = "0.890315" }, NotificationDelay),
+            1300 => Verification(13, "Changing final currency and amount", 1625, 2600, "AUD", "0.624810"),
+            1400 => Verification(14, "Changing final amount to x100", amount * 100, amount * 100),
             1900 => Approved(19, "Changing final amount to 20", 2000),
-            4600 => Verification(46, "Changing final amount to x2", amount * 2),
+            4600 => Verification(46, "Changing final amount to x2", amount * 2, amount * 2),
             _ => new ApproveOutcome(Change("0", "[TEST] Transaction status: approved", "successful"), NotificationDelay)
         };
     }
@@ -130,7 +144,8 @@ public static class PraxisEWalletCases
     /// <summary>The outcome of an e-wallet deadline follow-up; null for a name this table does not know.</summary>
     public static IOutcome? FollowUp(string? name) => name switch
     {
-        PageAbandoned or PendingTimeout => new DeclineOutcome(Change("0", TimedOut, "failed"), NotificationDelay),
+        PageAbandoned => new DeclineOutcome(Change("0", TimedOutPendingAsync, "failed"), NotificationDelay),
+        PageOpenedAbandoned or PendingTimeout => new DeclineOutcome(Change("0", TimedOut, "failed"), NotificationDelay),
         _ => null
     };
 

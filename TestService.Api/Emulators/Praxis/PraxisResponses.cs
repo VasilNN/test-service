@@ -178,9 +178,9 @@ public static class PraxisResponses
         ["session_status"] = tx.SessionStatus,
         ["order_id"] = tx.OrderId,
         ["currency"] = tx.Currency,
-        ["amount"] = tx.Amount,
-        ["conversion_rate"] = "1.000000",
-        ["processed_currency"] = tx.ProcessedCurrency ?? tx.Currency,
+        ["amount"] = tx.SessionAmount ?? tx.Amount,
+        ["conversion_rate"] = ConversionRate(tx),
+        ["processed_currency"] = tx.SessionProcessedCurrency ?? tx.ProcessedCurrency ?? tx.Currency,
         ["processed_amount"] = SessionProcessedAmount(tx, shape),
         ["payment_method"] = tx.Data(Keys.PaymentMethod),
         ["gateway"] = tx.Data(Keys.Gateway),
@@ -191,13 +191,16 @@ public static class PraxisResponses
     };
 
     /// <summary>
-    /// <c>session.processed_amount</c>: the processed (or else requested) amount; in the first e-wallet reply
-    /// the sandbox shows 0 unless the transaction is already approved.
+    /// <c>session.processed_amount</c>: the session's own processed amount, else the processed (or else requested)
+    /// amount. The first e-wallet reply [sbx] and every notification [qa2: card and e-wallet] show 0 unless the
+    /// transaction is approved.
     /// </summary>
     private static long SessionProcessedAmount(EmulatedTransaction tx, Shape shape) =>
-        shape == Shape.DirectProcess && IsEWallet(tx) && tx.Status != TransactionStatus.Approved
+        tx.Status != TransactionStatus.Approved && (shape == Shape.Notification || (shape == Shape.DirectProcess && IsEWallet(tx)))
             ? 0
-            : tx.ProcessedAmount ?? tx.RequestedAmount;
+            : tx.SessionProcessedAmount ?? tx.ProcessedAmount ?? tx.RequestedAmount;
+
+    private static string ConversionRate(EmulatedTransaction tx) => tx.ConversionRate ?? "1.000000";
 
     /// <summary>
     /// An e-wallet transaction still in its creation state (any payout, or a sale waiting for its page) is
@@ -222,7 +225,7 @@ public static class PraxisResponses
             ["transaction_id"] = tx.Tid.ToString(),
             ["currency"] = tx.Currency,
             ["amount"] = tx.Amount,
-            ["conversion_rate"] = "1.000000",
+            ["conversion_rate"] = ConversionRate(tx),
             ["processed_currency"] = tx.ProcessedCurrency,
             ["processed_amount"] = tx.ProcessedAmount,
             ["fee"] = 0,
@@ -281,7 +284,7 @@ public static class PraxisResponses
             ["transaction_id"] = tx.Tid.ToString(),
             ["currency"] = tx.Currency,
             ["amount"] = tx.Amount,
-            ["conversion_rate"] = "1.000000",
+            ["conversion_rate"] = ConversionRate(tx),
             ["processed_currency"] = tx.ProcessedCurrency,
             ["processed_amount"] = tx.ProcessedAmount,
             ["fee"] = 0,

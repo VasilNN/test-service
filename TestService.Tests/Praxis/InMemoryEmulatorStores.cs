@@ -132,8 +132,9 @@ public class InMemoryTransactionRepository : ITransactionRepository
         lock (_gate)
         {
             return Task.FromResult(_store.Values
-                .Where(t => t.Environment == environment && t.MerchantId == merchantId && t.Data("wallet_token") == walletToken)
-                .OrderByDescending(t => t.CreatedAt)
+                .Where(t => t.Environment == environment && t.MerchantId == merchantId && t.TransactionType == "sale"
+                            && t.Data("wallet_token") == walletToken)
+                .OrderByDescending(t => t.CreatedAt).ThenByDescending(t => t.Tid)
                 .Select(t => t.Clone())
                 .FirstOrDefault());
         }

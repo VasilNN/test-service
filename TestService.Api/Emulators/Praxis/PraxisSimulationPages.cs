@@ -13,7 +13,8 @@ public static class PraxisSimulationPages
 {
     public static string ThreeDsPage(string submitUrl)
     {
-        var action = WebUtility.HtmlEncode(submitUrl);
+        // A JavaScript string literal (JSON-encoded, so '&', '<', quotes are escaped for a <script> block), not HTML encoding.
+        var action = System.Text.Json.JsonSerializer.Serialize(submitUrl);
         var options = new StringBuilder();
         foreach (var (code, label) in PraxisTestCases.ThreeDsDeclineCodes)
         {
@@ -29,7 +30,7 @@ public static class PraxisSimulationPages
             <script>
                 const submit3D = (status) => {
                     const form3ds = document.getElementById('sandbox_3ds_form');
-                    form3ds.setAttribute('action', '{{action}}?status=' + status);
+                    form3ds.setAttribute('action', {{action}} + '?status=' + status);
                     form3ds.submit();
                 };
             </script>

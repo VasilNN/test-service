@@ -10,10 +10,12 @@ namespace TestService.Tests.Praxis;
 /// <summary>
 /// Reality check: replays each redacted sandbox example (<c>Examples/sandbox/&lt;case&gt;</c>) step by step
 /// against <see cref="PraxisEmulator"/> (in-memory stores, a manual clock moved by the recorded
-/// timestamps) and compares the recursive key set, <c>status</c>, <c>transaction.transaction_status</c>
-/// and <c>transaction.status_details</c> (for errors, <c>description</c>). The qa2 examples
-/// (<c>registration-response.json</c>, <c>notification-*.json</c>) are compared by key set.
-/// No Praxis host is ever called.
+/// timestamps) and compares the recursive key set (into arrays, element by element), <c>status</c>,
+/// <c>transaction.transaction_status</c> and <c>transaction.status_details</c> (for errors, <c>description</c>)
+/// and the values of <c>amount</c>, <c>processed_amount</c>, <c>processed_currency</c>, <c>status_code</c> and
+/// every <c>session</c> field (see <see cref="AssertSameValues"/>). The qa2 card examples
+/// (<c>registration-response.json</c>, <c>notification-*.json</c>) are compared by key set; the qa2 e-wallet
+/// examples by key set and, for the raw Praxis bodies, by value. No Praxis host is ever called.
 /// </summary>
 [TestFixture]
 public class ExampleShapeTests
@@ -343,6 +345,7 @@ public class ExampleShapeTests
         var expected = step.Example["response"]!;
         var label = $"{System.IO.Path.GetFileName(System.IO.Path.GetDirectoryName(step.File))}/{step.Name}";
         AssertSameKeys(expected, actual, label);
+        AssertSameValues(expected, actual, label, ExcludedValues.GetValueOrDefault(System.IO.Path.GetFileName(System.IO.Path.GetDirectoryName(step.File))!));
 
         Assert.Multiple(() =>
         {
@@ -524,11 +527,16 @@ public class ExampleShapeTests
         if (name == "deposit-response.json")
         {
             AssertSameKeys(expected, depositResponse, file);
+            AssertSameValues(expected, depositResponse, file);
+            AssertSameStatus(expected, depositResponse, file);
         }
         else if (name.StartsWith("notification-", StringComparison.Ordinal))
         {
             Assert.That(replay.Delivery.Jobs, Is.Not.Empty, $"{folder}: no notification");
-            AssertSameKeys(expected, JsonNode.Parse(replay.Delivery.Jobs[0].Body!)!, file);
+            var notification = JsonNode.Parse(replay.Delivery.Jobs[0].Body!)!;
+            AssertSameKeys(expected, notification, file);
+            AssertSameValues(expected, notification, file);
+            AssertSameStatus(expected, notification, file);
         }
         else
         {
@@ -539,19 +547,104 @@ public class ExampleShapeTests
 
     // ------------------------------------------------------------------ helpers
 
+    /// <summary>Every key path; array elements are walked by index (<c>gateway_list[1].gateway</c>).</summary>
     private static SortedSet<string> Keys(JsonNode? node, string prefix = "")
     {
         var keys = new SortedSet<string>(StringComparer.Ordinal);
-        if (node is JsonObject obj)
+        switch (node)
         {
-            foreach (var (key, value) in obj)
-            {
-                keys.Add(prefix + key);
-                keys.UnionWith(Keys(value, prefix + key + "."));
-            }
+            case JsonObject obj:
+                foreach (var (key, value) in obj)
+                {
+                    keys.Add(prefix + key);
+                    keys.UnionWith(Keys(value, prefix + key + "."));
+                }
+                break;
+            case JsonArray array:
+                for (var i = 0; i < array.Count; i++)
+                {
+                    keys.UnionWith(Keys(array[i], $"{prefix.TrimEnd('.')}[{i}]."));
+                }
+                break;
         }
         return keys;
     }
+
+    private static readonly HashSet<string> ComparedKeys = new(StringComparer.Ordinal)
+    {
+        "amount", "processed_amount", "processed_currency", "status_code"
+    };
+
+    /// <summary>Values the emulator does not reproduce, by sandbox example folder.</summary>
+    private static readonly Dictionary<string, string[]> ExcludedValues = new(StringComparer.Ordinal)
+    {
+        // CVV 900 / 901: Praxis answers with gateway 24UUrAzzzySSeayknvZCMGRDDIEU3N26, not the requested one; the emulator echoes the request's.
+        ["card-sale-cvv-900-lost"] = ["session.gateway"],
+        ["card-sale-cvv-901-stolen"] = ["session.gateway"]
+    };
+
+    private static void AssertSameStatus(JsonNode expected, JsonNode actual, string label) => Assert.Multiple(() =>
+    {
+        Assert.That(PraxisSigner.Text(actual, "transaction.transaction_status"),
+            Is.EqualTo(PraxisSigner.Text(expected, "transaction.transaction_status")), $"{label}: transaction_status");
+        Assert.That(PraxisSigner.Text(actual, "transaction.status_details"),
+            Is.EqualTo(PraxisSigner.Text(expected, "transaction.status_details")), $"{label}: status_details");
+    });
+
+    /// <summary>
+    /// The values of <see cref="ComparedKeys"/> (anywhere, arrays included) and of every <c>session</c> field must equal
+    /// the example's. Skipped: redacted placeholders (<c>&lt;...&gt;</c>), masked values (only <c>9</c>, <c>x</c> and
+    /// <c>-</c>), and ids, tokens, URLs and timestamps, which the replay issues itself.
+    /// </summary>
+    private static void AssertSameValues(JsonNode expected, JsonNode actual, string label, string[]? excluded = null)
+    {
+        var differences = new List<string>();
+        Compare(expected, actual, "", inSession: false, differences);
+        differences.RemoveAll(d => excluded?.Any(path => d.StartsWith(path + ":", StringComparison.Ordinal)) == true);
+        Assert.That(differences, Is.Empty, $"{label}: values differ: {string.Join("; ", differences)}. Actual body: {actual.ToJsonString()}");
+    }
+
+    private static void Compare(JsonNode? expected, JsonNode? actual, string path, bool inSession, List<string> differences)
+    {
+        switch (expected)
+        {
+            case JsonObject obj:
+                foreach (var (key, value) in obj)
+                {
+                    Compare(value, (actual as JsonObject)?[key], path.Length == 0 ? key : $"{path}.{key}", inSession || (path.Length == 0 && key == "session"),
+                        differences);
+                }
+                return;
+            case JsonArray array:
+                for (var i = 0; i < array.Count; i++)
+                {
+                    Compare(array[i], actual is JsonArray other && i < other.Count ? other[i] : null, $"{path}[{i}]", inSession, differences);
+                }
+                return;
+        }
+
+        var name = path[(path.LastIndexOf('.') + 1)..];
+        if (!(inSession || ComparedKeys.Contains(name)) || IsIssuedByTheReplay(name) || IsRedacted(expected))
+        {
+            return;
+        }
+        var expectedText = expected?.ToJsonString() ?? "null";
+        var actualText = actual?.ToJsonString() ?? "null";
+        if (expectedText != actualText)
+        {
+            differences.Add($"{path}: expected {expectedText}, actual {actualText}");
+        }
+    }
+
+    private static bool IsIssuedByTheReplay(string key) =>
+        key is "timestamp" or "tid" or "cid" or "auth_token"
+        || key.EndsWith("_id", StringComparison.Ordinal)
+        || key.EndsWith("_token", StringComparison.Ordinal)
+        || key.EndsWith("_url", StringComparison.Ordinal);
+
+    private static bool IsRedacted(JsonNode? value) =>
+        value is JsonValue v && v.TryGetValue<string>(out var text)
+        && (text.StartsWith('<') && text.EndsWith('>') || Regex.IsMatch(text, "^[9x-]{6,}$"));
 
     private static void AssertSameKeys(JsonNode expected, JsonNode actual, string label)
     {

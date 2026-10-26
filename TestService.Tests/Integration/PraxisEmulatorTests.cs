@@ -348,7 +348,7 @@ public class PraxisEmulatorTests : IntegrationTestBase
     {
         using var emulator = NewEmulatorClient();
         var environment = NewEnvironment();
-        var merchant = await RegisterAsync(environment, timeScale: 0.01);
+        var merchant = await RegisterAsync(environment, timeScale: 0.1); // 540 s -> 54 s to submit, notification after 1.5 s
         var sale = await SaleAsync(environment, merchant, "333", 4900, NotifyUrl(environment));
         var tid = Tid(sale);
         Assert.That(Status(sale), Is.EqualTo("initialized"));
@@ -383,16 +383,16 @@ public class PraxisEmulatorTests : IntegrationTestBase
         var tid = Tid(await SaleAsync(environment, merchant, "333", 4900, NotifyUrl(environment)));
 
         // The stored transaction flips without any request touching it: the hosted deadline service and the
-        // Mongo due-deadline query apply it (the transactions endpoint reads the store, it applies nothing).
+        // Mongo due-deadline query apply it. Read the store directly (the transactions endpoint applies due deadlines itself).
+        var repository = Factory.Services.GetRequiredService<ITransactionRepository>();
         var deadline = DateTime.UtcNow + PollTimeout;
-        string? stored = null;
-        while (stored != "rejected" && DateTime.UtcNow < deadline)
+        TransactionStatus? stored = null;
+        while (stored != TransactionStatus.Rejected && DateTime.UtcNow < deadline)
         {
             await Task.Delay(200);
-            var rows = (await Client.GetFromJsonAsync<JsonArray>($"/api/emulators/praxis/transactions?environment={environment}&tid={tid}"))!;
-            stored = rows.Single()!["status"]!.GetValue<string>();
+            stored = (await repository.GetAsync(tid))!.Status;
         }
-        Assert.That(stored, Is.EqualTo("rejected"), "applied by the background deadline service");
+        Assert.That(stored, Is.EqualTo(TransactionStatus.Rejected), "applied by the background deadline service");
 
         var found = await FindAsync(environment, merchant, tid);
 
@@ -403,6 +403,19 @@ public class PraxisEmulatorTests : IntegrationTestBase
                 Is.EqualTo("Transaction timed out. Old status pending_async. New status declined"));
         });
         AssertSignedNotification((await PollNotificationsAsync(environment, 1)).Single(), merchant, tid, "rejected");
+    }
+
+    [Test]
+    public async Task Transactions_TwoSales_NewestFirst()
+    {
+        var environment = NewEnvironment();
+        var merchant = await RegisterAsync(environment);
+        var first = Tid(await SaleAsync(environment, merchant, "568", 4900));
+        var second = Tid(await SaleAsync(environment, merchant, "000", 4900));
+
+        var stored = (await Client.GetFromJsonAsync<JsonArray>($"/api/emulators/praxis/transactions?environment={environment}"))!;
+
+        Assert.That(stored.Select(t => t!["tid"]!.GetValue<long>()), Is.EqualTo(new[] { second, first }));
     }
 
     [Test]

@@ -210,7 +210,8 @@ public partial class PraxisEmulator
 
     /// <summary>
     /// The APM page: for the page-open trigger amounts it applies the outcome and redirects to <c>return_url</c>;
-    /// otherwise it shows the five buttons. 404 unknown tid, 409 when the sale no longer awaits its page.
+    /// otherwise it shows the five buttons, and from then on an unanswered page times out from <c>pending</c>
+    /// instead of <c>pending_async</c>. 404 unknown tid, 409 when the sale no longer awaits its page.
     /// </summary>
     private async Task<EmulatorReply> ApmPageAsync(EmulatorRequest request, long tid)
     {
@@ -227,14 +228,27 @@ public partial class PraxisEmulator
                 throw new InvalidTransactionTransitionException(tx.Status, "ApmPage");
             }
             var outcome = PraxisEWalletCases.PageOpen(tx.RequestedAmount);
-            applied = outcome is not null;
-            outcome?.Apply(tx, context);
-            return applied;
+            if (outcome is not null)
+            {
+                applied = true;
+                outcome.Apply(tx, context);
+                return true;
+            }
+            if (tx.Deadline is { FollowUp: PraxisEWalletCases.PageAbandoned } deadline)
+            {
+                tx.SetDeadline(new TransactionDeadline { DueAt = deadline.DueAt, FollowUp = PraxisEWalletCases.PageOpenedAbandoned });
+                return true;
+            }
+            return false;
         }, environment: request.Environment);
 
         if (result.Transaction is null)
         {
             return EmulatorReply.Message(StatusCodes.Status404NotFound, $"Unknown transaction {tid}");
+        }
+        if (result.SaveConflict)
+        {
+            return EmulatorReply.Message(StatusCodes.Status409Conflict, SaveConflictMessage(tid));
         }
         if (result.Refused)
         {
@@ -274,6 +288,10 @@ public partial class PraxisEmulator
         {
             return EmulatorReply.Message(StatusCodes.Status400BadRequest, result.InvalidArgument);
         }
+        if (result.SaveConflict)
+        {
+            return EmulatorReply.Message(StatusCodes.Status409Conflict, SaveConflictMessage(tid));
+        }
         if (result.Refused)
         {
             return EmulatorReply.Message(StatusCodes.Status409Conflict, $"Transaction {tid} is not awaiting its payment page");
@@ -297,7 +315,7 @@ public partial class PraxisEmulator
     /// </summary>
     private static bool AwaitsApmPage(EmulatedTransaction tx) =>
         IsEWallet(tx) && tx.TransactionType == "sale" && tx.Status == TransactionStatus.Initialized
-        && (tx.Deadline is null || tx.Deadline.FollowUp == PraxisEWalletCases.PageAbandoned);
+        && (tx.Deadline is null || tx.Deadline.FollowUp is PraxisEWalletCases.PageAbandoned or PraxisEWalletCases.PageOpenedAbandoned);
 
     private async Task<EmulatedTransaction?> LoadEWalletAsync(string environment, long tid, string transactionType)
     {
@@ -308,7 +326,7 @@ public partial class PraxisEmulator
             : null;
     }
 
-    /// <summary>A <c>direct/wallet-token</c> payout: wallet data and customer come from the merchant's newest transaction with that token.</summary>
+    /// <summary>A <c>direct/wallet-token</c> payout: wallet data and customer come from the merchant's newest sale with that token.</summary>
     private async Task FillFromWalletTokenAsync(EmulatedTransaction tx, JsonNode? body, PraxisMerchant merchant)
     {
         var walletToken = Text(body, "wallet_token");

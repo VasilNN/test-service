@@ -124,8 +124,9 @@ public class MongoTransactionRepository : ITransactionRepository
     public async Task<EmulatedTransaction?> FindByWalletTokenAsync(string environment, string merchantId, string walletToken) =>
         await _transactions.Find(Builders<EmulatedTransaction>.Filter.Eq(x => x.Environment, environment)
                 & Builders<EmulatedTransaction>.Filter.Eq(x => x.MerchantId, merchantId)
+                & Builders<EmulatedTransaction>.Filter.Eq(x => x.TransactionType, "sale")
                 & Builders<EmulatedTransaction>.Filter.Eq("providerData.wallet_token", walletToken))
-            .SortByDescending(x => x.CreatedAt)
+            .SortByDescending(x => x.CreatedAt).ThenByDescending(x => x.Tid)
             .FirstOrDefaultAsync();
 
     private sealed class TidCounter

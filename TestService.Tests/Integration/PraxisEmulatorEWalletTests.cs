@@ -269,10 +269,13 @@ public class PraxisEmulatorEWalletTests : IntegrationTestBase
                 Is.EqualTo("Payout request status must be \"requested\" in order to proceed with processing (currently \"pending\")"));
         });
 
-        // A wallet-token payout (BillingServer's withdrawal path) reuses the wallet of an approved sale.
+        // A wallet-token payout (BillingServer's withdrawal path) reuses the wallet of an approved sale, not of a later
+        // direct/apm payout with the same token (its wallet_data is only the e-mail).
         var sale = await SignedAsync(environment, "direct/apm", PraxisRequestBuilder.Apm(merchant, Unix, "sale", 20000), merchant);
         AssertStatusCode(await browser.GetAsync($"/emulators/praxis/{environment}/pages/apm/{Tid(sale)}/response?status=approved"), HttpStatusCode.Found);
         var found = await FindAsync(environment, merchant, Tid(sale));
+        var later = await SignedAsync(environment, "direct/apm", PraxisRequestBuilder.Apm(merchant, Unix, "payout", 5100), merchant);
+        Assert.That(PraxisSigner.Text(later, "transaction.wallet.wallet_token"), Is.EqualTo(PraxisSigner.Text(found, "transaction.wallet.wallet_token")));
         var byToken = await SignedAsync(environment, "direct/wallet-token", PraxisRequestBuilder.WalletTokenPayout(merchant, Unix, 5100,
             PraxisSigner.Text(found, "transaction.wallet.wallet_token"), PraxisSigner.Text(found, "customer.customer_token")), merchant);
         Assert.Multiple(() =>
@@ -280,6 +283,7 @@ public class PraxisEmulatorEWalletTests : IntegrationTestBase
             Assert.That(Status(byToken), Is.EqualTo("approved"));
             Assert.That(PraxisSigner.Text(byToken, "transaction.wallet.wallet_token"), Is.EqualTo(PraxisSigner.Text(found, "transaction.wallet.wallet_token")));
             Assert.That(PraxisSigner.Text(byToken, "transaction.wallet.data.email"), Is.EqualTo("jane.doe@example.com"));
+            Assert.That(PraxisSigner.Text(byToken, "transaction.wallet.data.phone"), Is.EqualTo("+10000000000"), "from the sale's wallet_data");
         });
     }
 

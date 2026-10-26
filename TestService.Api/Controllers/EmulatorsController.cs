@@ -14,12 +14,15 @@ public class EmulatorsController : ControllerBase
 {
     private readonly IPraxisMerchantRepository _merchants;
     private readonly ITransactionRepository _transactions;
+    private readonly PraxisEmulator _praxis;
     private readonly ILogger<EmulatorsController> _logger;
 
-    public EmulatorsController(IPraxisMerchantRepository merchants, ITransactionRepository transactions, ILogger<EmulatorsController> logger)
+    public EmulatorsController(IPraxisMerchantRepository merchants, ITransactionRepository transactions, PraxisEmulator praxis,
+        ILogger<EmulatorsController> logger)
     {
         _merchants = merchants;
         _transactions = transactions;
+        _praxis = praxis;
         _logger = logger;
     }
 
@@ -122,6 +125,8 @@ public class EmulatorsController : ControllerBase
     {
         try
         {
+            // Due deadlines first, so the read shows them as find-transaction would.
+            await _praxis.ApplyDueDeadlinesAsync();
             return Ok(await _transactions.QueryAsync(environment, orderId, tid));
         }
         catch (Exception ex)

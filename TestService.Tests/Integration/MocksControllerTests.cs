@@ -219,6 +219,36 @@ public class MocksControllerTests : IntegrationTestBase
     }
 
     [Test]
+    public async Task Verify_SameRouteInTwoEnvironments_CountsOnlyTheRequestedEnvironment()
+    {
+        var environment = $"verify-env-a-{Guid.NewGuid():N}";
+        var other = $"verify-env-b-{Guid.NewGuid():N}";
+        try
+        {
+            await SendMockRequestAsync(environment, "/same", "GET");
+            await SendMockRequestAsync(other, "/same", "GET");
+            await SendMockRequestAsync(other, "/same", "GET");
+
+            var response = await Client.PostAsJsonAsync("/api/mocks/verify", new MockVerificationRequest
+            {
+                Environment = environment,
+                Matcher = new MockRequestMatcher { Method = "GET", Path = "/same" },
+                ExactCount = 1
+            });
+
+            AssertStatusCode(response, HttpStatusCode.OK);
+            var result = await response.Content.ReadFromJsonAsync<MockVerificationResponse>();
+            Assert.That(result!.MatchedCount, Is.EqualTo(1));
+            Assert.That(result.Success, Is.True);
+        }
+        finally
+        {
+            await Client.DeleteAsync($"/api/mocks/requests?environment={environment}");
+            await Client.DeleteAsync($"/api/mocks/requests?environment={other}");
+        }
+    }
+
+    [Test]
     public async Task CreateExpectation_WithInvalidPathRegex_ReturnsBadRequestAndStoresNothing()
     {
         var environment = $"bad-regex-{Guid.NewGuid():N}";

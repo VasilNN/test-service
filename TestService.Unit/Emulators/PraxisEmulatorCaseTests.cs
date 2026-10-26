@@ -1,5 +1,6 @@
 using System.Text.Json.Nodes;
 using TestService.Api.Emulators.Praxis;
+using TestService.Api.Emulators.Transactions;
 using TestService.Tests.Praxis;
 using static TestService.Unit.Emulators.PraxisEmulatorHarness;
 
@@ -44,7 +45,7 @@ public class PraxisEmulatorCaseTests
         ["568", 1900L, "approved", "19", "[TEST CASE - amount 19] Changing final amount to 20", 2000L, 1900L, 0],
         ["568", 4600L, "approved", "46", "[TEST CASE - amount 46] Changing final amount to x2", 9200L, 4600L, 0],
         ["568", 33900L, "approved", "0", Approved, 33900L, 33900L, 0],
-        ["801", 2020L, "approved", "0", Approved, 2020L, 2020L, 1],
+        ["801", 2020L, "approved", "0", Approved, 2020L, 2020L, 0],
         ["801", 3000L, "pending", "0", "[TEST] Transaction status: pending", 3000L, 3000L, 0]
     ];
 
@@ -71,6 +72,32 @@ public class PraxisEmulatorCaseTests
             Assert.That(Str(response, "transaction.card.card_number"), Is.EqualTo("411111******1111"));
             Assert.That(Str(response, "transaction.card.card_exp"), Is.EqualTo("12/2030"));
             Assert.That(Str(response, "transaction.card.card_type"), Is.EqualTo("VISA"));
+        });
+    }
+
+    [Test]
+    public async Task Sale_ByCardTokenWithoutCardData_TakesTheDefaultDecline()
+    {
+        var harness = new PraxisEmulatorHarness();
+        var seed = await harness.SaleAsync("568", 4900);
+        harness.Delivery.Jobs.Clear();
+        var body = PraxisRequestBuilder.Sale(harness.Merchant, harness.Now, "568", 4900, NotificationUrl);
+        body.Remove("card_data");
+        body["card_token"] = Str(seed, "transaction.card.card_token");
+        body["customer_token"] = Str(seed, "customer.customer_token");
+
+        var reply = await harness.SendAsync("api/direct-process", body);
+        var response = reply.Json()!;
+        var stored = await harness.Transactions.GetAsync(Tid(response));
+
+        Assert.Multiple(() =>
+        {
+            Assert.That(Str(response, "status"), Is.EqualTo("0"), reply.Body);
+            Assert.That(Str(response, "transaction.transaction_status"), Is.EqualTo("rejected"));
+            Assert.That(Str(response, "transaction.status_details"), Is.EqualTo(Declined));
+            Assert.That(Str(response, "transaction.card.card_number"), Is.EqualTo("411111******1111"), "card from the seed sale");
+            Assert.That(stored!.CaseName, Is.EqualTo("declined-other"));
+            Assert.That(harness.Delivery.Jobs, Has.Count.EqualTo(1));
         });
     }
 
@@ -248,6 +275,18 @@ public class PraxisEmulatorCaseTests
     }
 
     [Test]
+    public void ThreeDsPage_SubmitUrl_IsAJavaScriptStringNotHtmlEncoded()
+    {
+        var page = PraxisSimulationPages.ThreeDsPage("http://emulator.test/pages/3ds/1/submit?a=1&b='x'");
+
+        Assert.Multiple(() =>
+        {
+            Assert.That(page, Does.Contain(@"""http://emulator.test/pages/3ds/1/submit?a=1\u0026b=\u0027x\u0027"" + '?status=' + status"));
+            Assert.That(page, Does.Not.Contain("&amp;"));
+        });
+    }
+
+    [Test]
     public async Task ThreeDs_Pending_ThenRejectedAfterScaledTimeout()
     {
         var harness = new PraxisEmulatorHarness(timeScale: 1);
@@ -270,6 +309,10 @@ public class PraxisEmulatorCaseTests
             Assert.That(timedOut["transaction"]!["processed_amount"], Is.Null);
             Assert.That(harness.Delivery.Jobs.Select(j => Str(JsonNode.Parse(j.Body!)!, "transaction.transaction_status")),
                 Is.EqualTo(new[] { "pending", "rejected" }));
+            // As the qa2 card notifications: the session shows 0 unless approved.
+            Assert.That(harness.Delivery.Jobs.Select(j => Str(JsonNode.Parse(j.Body!)!, "session.processed_amount")),
+                Is.EqualTo(new[] { "0", "0" }));
+            Assert.That(Str(JsonNode.Parse(harness.Delivery.Jobs[0].Body!)!, "transaction.processed_amount"), Is.EqualTo("4900"));
         });
     }
 
@@ -308,6 +351,45 @@ public class PraxisEmulatorCaseTests
             Assert.That(harness.Delivery.Jobs, Has.Count.EqualTo(1));
         });
         Assert.That((await harness.SubmitAsync(tid, "approved")).StatusCode, Is.EqualTo(409), "page submitted after the timeout");
+    }
+
+    [Test]
+    public async Task ThreeDs_SubmitAsTheFirstActionAfterTheTimeout_409AndTimedOutOnce()
+    {
+        var harness = new PraxisEmulatorHarness(timeScale: 1);
+        var tid = Tid(await harness.SaleAsync("333", 4900));
+        harness.Time.Advance(TimeSpan.FromSeconds(540));
+
+        var submit = await harness.SubmitAsync(tid, "approved");
+        var stored = await harness.Transactions.GetAsync(tid);
+
+        Assert.Multiple(() =>
+        {
+            Assert.That(submit.StatusCode, Is.EqualTo(409));
+            Assert.That(stored!.Status, Is.EqualTo(TransactionStatus.Rejected));
+            Assert.That(stored.StatusDetails, Is.EqualTo("Transaction timed out. Old status pending_async. New status declined"));
+            Assert.That(harness.Delivery.Jobs, Has.Count.EqualTo(1));
+            Assert.That(Str(JsonNode.Parse(harness.Delivery.Jobs[0].Body!)!, "transaction.transaction_status"), Is.EqualTo("rejected"));
+        });
+    }
+
+    [Test]
+    public async Task ThreeDs_PageAsTheFirstActionAfterTheTimeout_409AndTimedOutOnce()
+    {
+        var harness = new PraxisEmulatorHarness(timeScale: 1);
+        var tid = Tid(await harness.SaleAsync("333", 4900));
+        harness.Time.Advance(TimeSpan.FromSeconds(540));
+
+        var page = await harness.PageAsync(tid);
+        var stored = await harness.Transactions.GetAsync(tid);
+
+        Assert.Multiple(() =>
+        {
+            Assert.That(page.StatusCode, Is.EqualTo(409));
+            Assert.That(stored!.Status, Is.EqualTo(TransactionStatus.Rejected));
+            Assert.That(harness.Delivery.Jobs, Has.Count.EqualTo(1));
+            Assert.That(Str(JsonNode.Parse(harness.Delivery.Jobs[0].Body!)!, "transaction.transaction_status"), Is.EqualTo("rejected"));
+        });
     }
 
     [Test]
@@ -513,13 +595,19 @@ public class PraxisEmulatorCaseTests
         }
         harness.Transactions.BeforeNextSave = Conflict;
 
-        await harness.SubmitAsync(tid, "approved");
+        var submit = await harness.SubmitAsync(tid, "approved");
         harness.Transactions.BeforeNextSave = null;
+        var stored = await harness.Transactions.GetAsync(tid);
 
         Assert.Multiple(() =>
         {
+            Assert.That(submit.StatusCode, Is.EqualTo(409));
+            Assert.That(submit.Json()!["message"]!.GetValue<string>(),
+                Is.EqualTo($"Transaction {tid}: the decision could not be saved because of concurrent updates; try again"));
             Assert.That(harness.Transactions.Conflicts, Is.EqualTo(5));
             Assert.That(harness.Delivery.Jobs, Is.Empty);
+            Assert.That(stored!.Status, Is.EqualTo(TransactionStatus.Initialized), "still awaiting 3DS");
+            Assert.That(stored.Deadline!.FollowUp, Is.EqualTo(PraxisTestCases.ThreeDsAbandoned));
         });
     }
 

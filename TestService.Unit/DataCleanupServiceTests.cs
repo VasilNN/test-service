@@ -89,10 +89,21 @@ public class DataCleanupServiceTests
     }
 
     [Test]
-    public void PerformCleanup_MockLogDeleteFails_IsCaughtAndLogged()
+    public async Task PerformCleanup_RequestLogDeleteFails_IsCaughtAndCallbackLogsAreStillDeleted()
     {
         GivenSettings(7);
         _mockRepository.DeleteRequestLogsOlderThanAsync(Arg.Any<DateTime>())
+            .Returns(Task.FromException<long>(new InvalidOperationException("mongo down")));
+
+        Assert.DoesNotThrowAsync(() => _service.PerformCleanupAsync(CancellationToken.None));
+        await _mockRepository.Received(1).DeleteCallbackLogsOlderThanAsync(Arg.Any<DateTime>());
+    }
+
+    [Test]
+    public void PerformCleanup_CallbackLogDeleteFails_IsCaught()
+    {
+        GivenSettings(7);
+        _mockRepository.DeleteCallbackLogsOlderThanAsync(Arg.Any<DateTime>())
             .Returns(Task.FromException<long>(new InvalidOperationException("mongo down")));
 
         Assert.DoesNotThrowAsync(() => _service.PerformCleanupAsync(CancellationToken.None));
@@ -104,7 +115,11 @@ public class DataCleanupServiceTests
     [TestCase("activities")]
     [TestCase("Settings")]
     [TestCase("system.views")]
-    public void IsEntityCollection_MockAndSystemCollections_AreExcluded(string name)
+    [TestCase("PraxisMerchants")]
+    [TestCase("PraxisTransactions")]
+    [TestCase("EmulatorCounters")]
+    [TestCase("TestData")]
+    public void IsEntityCollection_MockEmulatorAndSystemCollections_AreExcluded(string name)
     {
         Assert.That(DataCleanupService.IsEntityCollection(name), Is.False);
     }

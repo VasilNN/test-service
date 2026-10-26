@@ -156,7 +156,9 @@ public class EmulatorsControllerTests
     {
         _merchants = new InMemoryPraxisMerchantRepository();
         _transactions = new InMemoryTransactionRepository();
-        _controller = new EmulatorsController(_merchants, _transactions, NullLogger<EmulatorsController>.Instance);
+        var emulator = new PraxisEmulator(_merchants, _transactions, new RecordingCallbackDelivery(), new FakeTimeProvider(),
+            NullLogger<PraxisEmulator>.Instance);
+        _controller = new EmulatorsController(_merchants, _transactions, emulator, NullLogger<EmulatorsController>.Instance);
     }
 
     private static PraxisMerchantRequest Valid(string merchantId = "m-1", string environment = "qa2") => new()
@@ -317,6 +319,24 @@ public class EmulatorsControllerTests
         });
     }
 
+    [Test]
+    public async Task GetTransactions_AppliesDueDeadlinesBeforeReading()
+    {
+        var harness = new PraxisEmulatorHarness(timeScale: 1);
+        var controller = new EmulatorsController(harness.Merchants, harness.Transactions, harness.Emulator, NullLogger<EmulatorsController>.Instance);
+        var tid = PraxisEmulatorHarness.Tid(await harness.SaleAsync("333", 4900));
+        harness.Time.Advance(TimeSpan.FromSeconds(540));
+
+        var listed = (IEnumerable<EmulatedTransaction>)((OkObjectResult)(await controller.GetTransactions(tid: tid)).Result!).Value!;
+
+        Assert.Multiple(() =>
+        {
+            Assert.That(listed.Single().Status, Is.EqualTo(TransactionStatus.Rejected));
+            Assert.That(listed.Single().StatusDetails, Is.EqualTo("Transaction timed out. Old status pending_async. New status declined"));
+            Assert.That(harness.Delivery.Jobs, Has.Count.EqualTo(1));
+        });
+    }
+
     private sealed class FailingStore : IPraxisMerchantRepository, ITransactionRepository
     {
         private static Exception Boom => new InvalidOperationException("boom");
@@ -341,7 +361,9 @@ public class EmulatorsControllerTests
     public async Task StoreFailures_500()
     {
         var store = new FailingStore();
-        var controller = new EmulatorsController(store, store, NullLogger<EmulatorsController>.Instance);
+        // The deadline service swallows store failures; the controller does not.
+        var emulator = new PraxisEmulator(store, store, new RecordingCallbackDelivery(), new FakeTimeProvider(), NullLogger<PraxisEmulator>.Instance);
+        var controller = new EmulatorsController(store, store, emulator, NullLogger<EmulatorsController>.Instance);
 
         static int? Status(IActionResult? result) => (result as ObjectResult)?.StatusCode;
         Assert.Multiple(async () =>
@@ -353,8 +375,6 @@ public class EmulatorsControllerTests
             Assert.That(Status((await controller.GetTransactions()).Result), Is.EqualTo(500));
         });
 
-        // The deadline service swallows store failures.
-        var emulator = new PraxisEmulator(store, store, new RecordingCallbackDelivery(), new FakeTimeProvider(), NullLogger<PraxisEmulator>.Instance);
         var service = new PraxisDeadlineService(emulator, new FakeTimeProvider(), NullLogger<PraxisDeadlineService>.Instance);
         Assert.That(await service.RunOnceAsync(), Is.EqualTo(0));
     }

@@ -426,6 +426,49 @@ public class MockServiceTests
         Assert.That(WarningMessages(), Has.Some.Contains("verification matcher (environment env1)"));
     }
 
+    // ── Invalid regex at match time ──────────────────────────────────────────
+
+    [Test]
+    public async Task ExecuteAsync_InvalidStoredPathRegex_IsNoMatchAndTheNextExpectationAnswers()
+    {
+        // Stored before patterns were validated on save.
+        var invalid = BuildExpectation(path: "/(", pathMatchType: PathMatchType.Regex, status: 418);
+        invalid.Name = "legacy";
+        var valid = BuildExpectation(path: "/(", pathMatchType: PathMatchType.Exact, status: 200, body: "ok");
+        _repository.GetExpectationsAsync(Arg.Any<string?>(), Arg.Any<bool>())
+            .Returns(new[] { invalid, valid });
+
+        var result = await _service.ExecuteAsync(new MockExecutionRequest { Path = "/(" });
+
+        Assert.Multiple(() =>
+        {
+            Assert.That(result.Matched, Is.True);
+            Assert.That(result.StatusCode, Is.EqualTo(200));
+            Assert.That(result.MatchedExpectationId, Is.EqualTo(valid.Id));
+            Assert.That(WarningMessages(), Has.Some.Contains($"expectation {invalid.Id} (legacy) is invalid"));
+        });
+    }
+
+    [Test]
+    public async Task VerifyAsync_InvalidBodyRegex_CountsNothingAndLogsWarning()
+    {
+        StubLogs(new[] { new MockRequestLog { Method = "POST", Path = "/", Body = "[a-" } });
+
+        var result = await _service.VerifyAsync(new MockVerificationRequest
+        {
+            Environment = "env1",
+            Matcher = new MockRequestMatcher { Path = "/", Body = "[a-", BodyMatchType = BodyMatchType.Regex },
+            ExactCount = 0
+        });
+
+        Assert.Multiple(() =>
+        {
+            Assert.That(result.Success, Is.True);
+            Assert.That(result.MatchedCount, Is.EqualTo(0));
+            Assert.That(WarningMessages(), Has.Some.Contains("verification matcher (environment env1)"));
+        });
+    }
+
     // ── Regex validation on save ─────────────────────────────────────────────
 
     [Test]

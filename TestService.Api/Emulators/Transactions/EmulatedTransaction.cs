@@ -7,7 +7,10 @@ namespace TestService.Api.Emulators.Transactions;
 /// The result a transition writes onto the transaction. <see cref="FinalAmount"/> replaces the
 /// transaction amount; <see cref="ProcessedAmount"/> and <see cref="ProcessedCurrency"/> override the
 /// processed values of a transition that sets them (approve, pending, authorize), which otherwise are
-/// the requested amount and the transaction currency.
+/// the requested amount and the transaction currency. The <c>Session*</c> values and
+/// <see cref="ConversionRate"/> are written by every transition (null when not given): they are the
+/// session values a provider shows apart from the transaction's own (for example a verification whose
+/// session keeps the processed amount the transaction clears).
 /// </summary>
 public sealed record StatusChange(string Code, string Details, string SessionStatus)
 {
@@ -16,6 +19,14 @@ public sealed record StatusChange(string Code, string Details, string SessionSta
     public long? ProcessedAmount { get; init; }
 
     public string? ProcessedCurrency { get; init; }
+
+    public long? SessionAmount { get; init; }
+
+    public long? SessionProcessedAmount { get; init; }
+
+    public string? SessionProcessedCurrency { get; init; }
+
+    public string? ConversionRate { get; init; }
 }
 
 /// <summary>A pending timed follow-up: at <see cref="DueAt"/> the follow-up named <see cref="FollowUp"/> is applied.</summary>
@@ -109,6 +120,22 @@ public class EmulatedTransaction
 
     [BsonElement("processedAmount")]
     public long? ProcessedAmount { get; private set; }
+
+    /// <summary>Session amount when it differs from <see cref="Amount"/>; null otherwise.</summary>
+    [BsonElement("sessionAmount")]
+    public long? SessionAmount { get; private set; }
+
+    /// <summary>Session processed amount when it differs from the transaction's; null otherwise.</summary>
+    [BsonElement("sessionProcessedAmount")]
+    public long? SessionProcessedAmount { get; private set; }
+
+    /// <summary>Session processed currency when it differs from the transaction's; null otherwise.</summary>
+    [BsonElement("sessionProcessedCurrency")]
+    public string? SessionProcessedCurrency { get; private set; }
+
+    /// <summary>The provider's conversion rate text when it is not 1; null otherwise.</summary>
+    [BsonElement("conversionRate")]
+    public string? ConversionRate { get; private set; }
 
     [BsonElement("status")]
     [BsonRepresentation(BsonType.String)]
@@ -313,6 +340,11 @@ public class EmulatedTransaction
             ProcessedCurrency = null;
             ProcessedAmount = null;
         }
+
+        SessionAmount = change.SessionAmount;
+        SessionProcessedAmount = change.SessionProcessedAmount;
+        SessionProcessedCurrency = change.SessionProcessedCurrency;
+        ConversionRate = change.ConversionRate;
 
         Deadline = null;
         OnStatusCheck = null;

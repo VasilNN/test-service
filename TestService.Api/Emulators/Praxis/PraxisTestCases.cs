@@ -58,7 +58,8 @@ public static class PraxisTestCases
         new(["588"], 71300, () => new PraxisSaleCase("timeout",
             new AwaitDecisionOutcome(Change("0", AuthenticationRequired, "open"), AuthenticationTimeout, Timeout713),
             RequiresAuthentication: true)),
-        new(["801"], 2020, () => new PraxisSaleCase("amount-20.20-cvv-801", ApprovedSale)),
+        // An amount case: approved without a notification, as amount 339.
+        new(["801"], 2020, () => new PraxisSaleCase("amount-20.20-cvv-801", new ApproveOutcome(Change("0", Approved, "successful")))),
         new(["801"], 3000, () => new PraxisSaleCase("amount-30-cvv-801",
             new PendingUntilStatusCheckOutcome(Change("0", "[TEST] Transaction status: pending", "open"), StatusCheck30))),
         // Amount (with the approving CVV 568)
@@ -185,7 +186,8 @@ public static class PraxisTestCases
                         new VerificationOutcome(Change("530", Declined, "failed"), NotificationDelay + DuplicateNotificationGap)),
                     "3ds-duplicate-amount" => new NotificationSequenceOutcome(
                         new ApproveOutcome(Change("530", "Approved", "successful"), NotificationDelay),
-                        new VerificationOutcome(Change("530", Approved, "successful") with { FinalAmount = 35000 },
+                        // The session keeps the approved amount 33500 [sbx].
+                        new VerificationOutcome(Change("530", Approved, "successful") with { FinalAmount = 35000, SessionAmount = 33500 },
                             NotificationDelay + DuplicateNotificationGap)),
                     "3ds-partial-at-psp" => new ApproveOutcome(
                         Change("530", "TEST amount 498, 3D partial approved with amount 400", "successful") with { FinalAmount = 40000, ProcessedAmount = 40000 },

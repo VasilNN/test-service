@@ -352,7 +352,7 @@ public partial class PraxisEmulator : IProviderEmulator
         {
             return Reply(Error(401, "Wrong credentials"));
         }
-        if (result.Refused)
+        if (result.Refused || result.SaveConflict)
         {
             return Reply(Error(1, "Generic Error"));
         }
@@ -404,6 +404,10 @@ public partial class PraxisEmulator : IProviderEmulator
         if (result.InvalidArgument is not null)
         {
             return EmulatorReply.Message(StatusCodes.Status400BadRequest, result.InvalidArgument);
+        }
+        if (result.SaveConflict)
+        {
+            return EmulatorReply.Message(StatusCodes.Status409Conflict, SaveConflictMessage(tid));
         }
         if (result.Refused)
         {
@@ -518,7 +522,15 @@ public partial class PraxisEmulator : IProviderEmulator
 
     // ------------------------------------------------------------------ state changes
 
-    private sealed record MutationResult(EmulatedTransaction? Transaction, bool Changed, bool Refused, string? InvalidArgument);
+    /// <summary>
+    /// <c>SaveConflict</c>: the change could not be saved after <see cref="MaxSaveAttempts"/> conflicting saves;
+    /// <c>Transaction</c> is then the stored (unchanged) transaction.
+    /// </summary>
+    private sealed record MutationResult(EmulatedTransaction? Transaction, bool Changed, bool Refused, string? InvalidArgument,
+        bool SaveConflict = false);
+
+    private static string SaveConflictMessage(long tid) =>
+        $"Transaction {tid}: the decision could not be saved because of concurrent updates; try again";
 
     /// <summary>
     /// Loads the transaction, applies a due deadline, then <paramref name="action"/> (true when it changed something),
@@ -583,7 +595,7 @@ public partial class PraxisEmulator : IProviderEmulator
             if (attempt >= MaxSaveAttempts)
             {
                 _logger.LogWarning("Praxis transaction {Tid}: gave up after {Attempts} conflicting saves", tid, attempt);
-                return new MutationResult(await _transactions.GetAsync(tid), false, Refused: true, null);
+                return new MutationResult(await _transactions.GetAsync(tid), false, Refused: false, null, SaveConflict: true);
             }
         }
     }

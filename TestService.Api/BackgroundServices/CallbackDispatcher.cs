@@ -191,6 +191,8 @@ public class CallbackDispatcher : BackgroundService
         }
         catch (Exception ex)
         {
+            // Connection or I/O error (also while reading the body after the headers arrived): no status code.
+            log.ResponseStatusCode = null;
             log.Error = ex.Message;
             _logger.LogWarning(ex, "Callback {Source} {CorrelationId} to {Url} failed", job.Source, job.CorrelationId, job.Url);
         }

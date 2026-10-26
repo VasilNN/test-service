@@ -310,6 +310,41 @@ public class CallbackDispatcherTests
         Assert.That(_queue.PendingCount, Is.EqualTo(0));
     }
 
+    [Test]
+    public async Task Enqueue_BodyReadFailsAfterHeaders_LogsErrorWithoutStatusCode()
+    {
+        _handler.Respond = _ => new HttpResponseMessage(HttpStatusCode.OK) { Content = new StreamContent(new FailingStream()) };
+        await StartAsync();
+
+        await _queue.EnqueueAsync(Job());
+        var log = (await WaitForLogsAsync(1)).Single();
+
+        Assert.Multiple(() =>
+        {
+            Assert.That(log.Error, Does.Contain("connection reset while reading the body"));
+            Assert.That(log.ResponseStatusCode, Is.Null);
+            Assert.That(_queue.PendingCount, Is.EqualTo(0));
+        });
+    }
+
+    // ── Duration ────────────────────────────────────────────────────────────
+
+    [Test]
+    public async Task Enqueue_Sent_LogsTheDurationOfTheExchange()
+    {
+        _handler.Elapse = TimeSpan.FromMilliseconds(250);
+        await StartAsync();
+
+        await _queue.EnqueueAsync(Job());
+        var log = (await WaitForLogsAsync(1)).Single();
+
+        Assert.Multiple(() =>
+        {
+            Assert.That(log.ResponseStatusCode, Is.EqualTo(200));
+            Assert.That(log.DurationMs, Is.EqualTo(250));
+        });
+    }
+
     // ── Response body truncation ────────────────────────────────────────────
 
     [Test]
@@ -415,6 +450,28 @@ public class CallbackDispatcherTests
     }
 
     [Test]
+    public async Task Stop_WhileReadingTheBody_LogsLostAndKeepsTheStatusCode()
+    {
+        var reading = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        _handler.Respond = _ => new HttpResponseMessage(HttpStatusCode.Accepted) { Content = new StreamContent(new StalledStream(reading)) };
+        await StartAsync();
+
+        await _queue.EnqueueAsync(Job());
+        await reading.Task.WaitAsync(WaitTimeout);
+
+        await _dispatcher.StopAsync(CancellationToken.None);
+        _started = false;
+
+        var log = _logs.Single();
+        Assert.Multiple(() =>
+        {
+            Assert.That(log.Error, Is.EqualTo(CallbackQueue.LostShutdown));
+            Assert.That(log.ResponseStatusCode, Is.EqualTo(202), "the reply headers had arrived");
+            Assert.That(_queue.PendingCount, Is.EqualTo(0));
+        });
+    }
+
+    [Test]
     public async Task Enqueue_FarFutureDueAt_DispatcherKeepsRunning()
     {
         await StartAsync();
@@ -511,8 +568,8 @@ public class CallbackDispatcherTests
         throw new DirectoryNotFoundException("TestService.Api project directory not found above the test output directory.");
     }
 
-    /// <summary>A response body that never yields data until cancelled.</summary>
-    private sealed class StalledStream : Stream
+    /// <summary>A response body that never yields data until cancelled; <paramref name="reading"/> is set on the first read.</summary>
+    private sealed class StalledStream(TaskCompletionSource? reading = null) : Stream
     {
         public override bool CanRead => true;
         public override bool CanSeek => false;
@@ -527,6 +584,7 @@ public class CallbackDispatcherTests
 
         public override async ValueTask<int> ReadAsync(Memory<byte> buffer, CancellationToken cancellationToken = default)
         {
+            reading?.TrySetResult();
             await Task.Delay(Timeout.Infinite, cancellationToken);
             return 0;
         }
@@ -535,15 +593,39 @@ public class CallbackDispatcherTests
             ReadAsync(buffer.AsMemory(offset, count), cancellationToken).AsTask();
     }
 
+    /// <summary>A response body whose read fails like a connection reset after the headers arrived.</summary>
+    private sealed class FailingStream : Stream
+    {
+        public override bool CanRead => true;
+        public override bool CanSeek => false;
+        public override bool CanWrite => false;
+        public override long Length => throw new NotSupportedException();
+        public override long Position { get => throw new NotSupportedException(); set => throw new NotSupportedException(); }
+        public override void Flush() { }
+        public override int Read(byte[] buffer, int offset, int count) => throw new IOException("connection reset while reading the body");
+        public override long Seek(long offset, SeekOrigin origin) => throw new NotSupportedException();
+        public override void SetLength(long value) => throw new NotSupportedException();
+        public override void Write(byte[] buffer, int offset, int count) => throw new NotSupportedException();
+
+        public override ValueTask<int> ReadAsync(Memory<byte> buffer, CancellationToken cancellationToken = default) =>
+            ValueTask.FromException<int>(new IOException("connection reset while reading the body"));
+
+        public override Task<int> ReadAsync(byte[] buffer, int offset, int count, CancellationToken cancellationToken) =>
+            ReadAsync(buffer.AsMemory(offset, count), cancellationToken).AsTask();
+    }
+
     private sealed record CapturedRequest(string Url, string Method, Dictionary<string, string> Headers, string? Body, DateTimeOffset At);
 
-    private sealed class StubHandler(TimeProvider time) : HttpMessageHandler
+    private sealed class StubHandler(FakeTimeProvider time) : HttpMessageHandler
     {
         public ConcurrentQueue<CapturedRequest> Requests { get; } = new();
         public Func<HttpRequestMessage, HttpResponseMessage> Respond { get; set; } =
             _ => new HttpResponseMessage(HttpStatusCode.OK) { Content = new StringContent("ok") };
         public bool Hang { get; set; }
         public TaskCompletionSource? Gate { get; set; }
+
+        /// <summary>Fake time that passes while the target answers.</summary>
+        public TimeSpan Elapse { get; set; }
 
         public void Release() => Gate?.TrySetResult();
 
@@ -572,6 +654,10 @@ public class CallbackDispatcherTests
             if (Gate != null)
             {
                 await Gate.Task.WaitAsync(cancellationToken);
+            }
+            if (Elapse > TimeSpan.Zero)
+            {
+                time.Advance(Elapse);
             }
             return Respond(request);
         }

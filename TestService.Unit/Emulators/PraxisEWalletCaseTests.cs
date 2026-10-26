@@ -16,6 +16,7 @@ namespace TestService.Unit.Emulators;
 public class PraxisEWalletCaseTests
 {
     private const string TimedOut = "Transaction timed out. Old status pending. New status declined";
+    private const string TimedOutPendingAsync = "Transaction timed out. Old status pending_async. New status declined";
     private const string PayoutSuccess = "[TEST] Payout capture successfully";
 
     private static readonly string[] PaymentKeys = ["name", "email", "phone", "customer_country", "zip", "dqa_t", "test", "ip_address", "QA", "testNumber"];
@@ -188,6 +189,7 @@ public class PraxisEWalletCaseTests
             Assert.That(Str(notification, "transaction.transaction_status"), Is.EqualTo("rejected"));
             Assert.That(Str(notification, "transaction.is_async"), Is.EqualTo("0"));
             Assert.That(Str(notification, "transaction.cascade_level"), Is.EqualTo("0"));
+            Assert.That(Str(notification, "session.processed_amount"), Is.EqualTo("0"), "qa2: 0 unless approved");
             Assert.That(job.Headers[PraxisSigner.HeaderName], Is.EqualTo(PraxisSigner.ForNotification(notification, harness.Merchant.Secret)));
         });
     }
@@ -216,6 +218,8 @@ public class PraxisEWalletCaseTests
         {
             Assert.That(Str(found, "transaction.transaction_status"), Is.EqualTo("verification"));
             Assert.That(found["transaction"]!["amount"]!.GetValue<long>(), Is.EqualTo(26720));
+            Assert.That(Str(found, "session.amount"), Is.EqualTo("13360"), "sandbox: the session keeps the copies' amount");
+            Assert.That(Str(found, "session.processed_amount"), Is.EqualTo("13360"));
             Assert.That(harness.Delivery.Jobs, Has.Count.EqualTo(3), "no notification of the verification itself");
         });
     }
@@ -223,7 +227,7 @@ public class PraxisEWalletCaseTests
     // ------------------------------------------------------------------ buttons
 
     // amount, button, status, code, details, final amount, processed amount, processed currency, wallet, notifications, session status
-    // (Pending times out at once with timeScale 0, like every emulator timeout: see Button_Pending_TimesOutAfter450ScaledSecondsWithNotification.)
+    // (Pending times out at once with timeScale 0, like every emulator timeout: see Button_Pending_TimeScaleZero_TimesOutAtOnce.)
     private static readonly object?[][] ButtonRows =
     [
         [20000L, "approved", "approved", "0", "[TEST] Transaction status: approved", 20000L, 20000L, "EUR", true, 1, "successful"],
@@ -274,6 +278,28 @@ public class PraxisEWalletCaseTests
         });
     }
 
+    [TestCase(1300L, "2600", "AUD", "0.624810")]
+    [TestCase(1400L, "140000", "EUR", "1.000000")]
+    [TestCase(4600L, "9200", "EUR", "1.000000")]
+    public async Task Button_VerificationAmounts_SessionShowsTheProcessedValues(long amount, string processed, string currency, string rate)
+    {
+        var harness = new PraxisEmulatorHarness();
+        var tid = Tid(await SaleAsync(harness, amount));
+        await harness.GetPageAsync($"pages/apm/{tid}/response", "approved");
+
+        var found = await harness.FindAsync(tid);
+
+        Assert.Multiple(() =>
+        {
+            Assert.That(Str(found, "transaction.transaction_status"), Is.EqualTo("verification"));
+            Assert.That(found["transaction"]!["processed_amount"], Is.Null);
+            Assert.That(Str(found, "session.processed_amount"), Is.EqualTo(processed));
+            Assert.That(Str(found, "session.processed_currency"), Is.EqualTo(currency));
+            Assert.That(Str(found, "session.conversion_rate"), Is.EqualTo(rate));
+            Assert.That(Str(found, "transaction.conversion_rate"), Is.EqualTo(rate));
+        });
+    }
+
     [Test]
     public async Task Button_Amount12_SessionShowsTheProcessedCurrency()
     {
@@ -288,6 +314,7 @@ public class PraxisEWalletCaseTests
         {
             Assert.That(Str(found, "session.processed_currency"), Is.EqualTo("USD"));
             Assert.That(Str(found, "session.currency"), Is.EqualTo("EUR"));
+            Assert.That(Str(found, "session.conversion_rate"), Is.EqualTo("0.890315"));
             Assert.That(Str(notification, "transaction.processed_currency"), Is.EqualTo("USD"));
             Assert.That(harness.Delivery.Jobs.Single().Headers[PraxisSigner.HeaderName],
                 Is.EqualTo(PraxisSigner.ForNotification(notification, harness.Merchant.Secret)));
@@ -325,6 +352,44 @@ public class PraxisEWalletCaseTests
     }
 
     [Test]
+    public async Task Button_Pending_TimeScaleZero_TimesOutAtOnce()
+    {
+        var harness = new PraxisEmulatorHarness();
+        var tid = Tid(await SaleAsync(harness, 20000));
+
+        var pressed = await harness.GetPageAsync($"pages/apm/{tid}/response", "pending");
+        var found = await harness.FindAsync(tid);
+
+        Assert.Multiple(() =>
+        {
+            Assert.That(pressed.StatusCode, Is.EqualTo(302));
+            Assert.That(Str(found, "transaction.transaction_status"), Is.EqualTo("rejected"));
+            Assert.That(Str(found, "transaction.status_details"), Is.EqualTo(TimedOut));
+            Assert.That(harness.Delivery.Jobs, Has.Count.EqualTo(1));
+        });
+    }
+
+    [Test]
+    public async Task PageNeverOpened_RejectedAt450ScaledSecondsFromPendingAsync()
+    {
+        var harness = new PraxisEmulatorHarness(timeScale: 1);
+        var tid = Tid(await SaleAsync(harness, 20000));
+        await harness.GetPageAsync($"pages/apm-request/{tid}");
+
+        harness.Time.Advance(TimeSpan.FromSeconds(450));
+        var found = await harness.FindAsync(tid);
+        var notification = JsonNode.Parse(harness.Delivery.Jobs.Single().Body!)!;
+
+        Assert.Multiple(() =>
+        {
+            Assert.That(Str(found, "transaction.transaction_status"), Is.EqualTo("rejected"));
+            Assert.That(Str(found, "transaction.status_details"), Is.EqualTo(TimedOutPendingAsync), "qa2: the page was never opened");
+            Assert.That(Str(notification, "transaction.status_details"), Is.EqualTo(TimedOutPendingAsync));
+            Assert.That(Str(notification, "session.processed_amount"), Is.EqualTo("0"));
+        });
+    }
+
+    [Test]
     public async Task PageNeverSubmitted_RejectedAt450ScaledSeconds_AndThePageAnswers409()
     {
         var harness = new PraxisEmulatorHarness(timeScale: 1);
@@ -332,6 +397,7 @@ public class PraxisEWalletCaseTests
 
         harness.Time.Advance(TimeSpan.FromSeconds(449));
         Assert.That((await harness.GetPageAsync($"pages/apm/{tid}")).StatusCode, Is.EqualTo(200));
+        Assert.That((await harness.Transactions.GetAsync(tid))!.Deadline!.FollowUp, Is.EqualTo(PraxisEWalletCases.PageOpenedAbandoned));
 
         harness.Time.Advance(TimeSpan.FromSeconds(1));
         Assert.That(await harness.Emulator.ApplyDueDeadlinesAsync(), Is.EqualTo(1));
@@ -339,7 +405,7 @@ public class PraxisEWalletCaseTests
         await Assert.MultipleAsync(async () =>
         {
             Assert.That(Str(found, "transaction.transaction_status"), Is.EqualTo("rejected"));
-            Assert.That(Str(found, "transaction.status_details"), Is.EqualTo(TimedOut));
+            Assert.That(Str(found, "transaction.status_details"), Is.EqualTo(TimedOut), "sandbox: the buttons page was shown");
             Assert.That(Str(found, "session.session_status"), Is.EqualTo("failed"));
             Assert.That(harness.Delivery.Jobs, Has.Count.EqualTo(1));
             Assert.That((await harness.GetPageAsync($"pages/apm/{tid}")).StatusCode, Is.EqualTo(409));
@@ -395,6 +461,32 @@ public class PraxisEWalletCaseTests
         var page = await harness.GetPageAsync(path, "approved");
 
         Assert.That(page.StatusCode, Is.EqualTo(404));
+    }
+
+    [Test]
+    public async Task Pages_TidOfAnotherEnvironment_404()
+    {
+        var harness = new PraxisEmulatorHarness();
+        var sale = Tid(await SaleAsync(harness, 20000));
+        var payout = Tid(await PayoutAsync(harness, 30000));
+
+        async Task<int> GetInOtherEnvironmentAsync(string path, string? status = null) => (await harness.Emulator.HandleAsync(new EmulatorRequest
+        {
+            Environment = "other",
+            Path = path,
+            Method = "GET",
+            Query = status is null ? new Dictionary<string, string>() : new Dictionary<string, string> { ["status"] = status },
+            BaseUrl = "http://emulator.test"
+        })).StatusCode;
+
+        await Assert.MultipleAsync(async () =>
+        {
+            Assert.That(await GetInOtherEnvironmentAsync($"pages/apm-request/{sale}"), Is.EqualTo(404));
+            Assert.That(await GetInOtherEnvironmentAsync($"pages/apm/{sale}"), Is.EqualTo(404));
+            Assert.That(await GetInOtherEnvironmentAsync($"pages/apm/{sale}/response", "approved"), Is.EqualTo(404));
+            Assert.That(await GetInOtherEnvironmentAsync($"pages/payout/{payout}"), Is.EqualTo(404));
+            Assert.That(Str(await harness.FindAsync(sale), "transaction.transaction_status"), Is.EqualTo("initialized"), "nothing changed");
+        });
     }
 
     [Test]
@@ -602,6 +694,9 @@ public class PraxisEWalletCaseTests
         await harness.GetPageAsync($"pages/apm/{saleTid}/response", "approved");
         var sale = await harness.FindAsync(saleTid);
         var walletToken = Str(sale, "transaction.wallet.wallet_token");
+        // A later direct/apm payout carries the same token but only {email}: it is never the source.
+        var payout = await PayoutAsync(harness, 5100);
+        Assert.That(Str(payout, "transaction.wallet.wallet_token"), Is.EqualTo(walletToken));
 
         var reply = await harness.SendAsync("direct/wallet-token", PraxisRequestBuilder.WalletTokenPayout(harness.Merchant, harness.Now, 1100,
             walletToken, Str(sale, "customer.customer_token")));
@@ -621,6 +716,23 @@ public class PraxisEWalletCaseTests
             Assert.That(Str(response, "customer.customer_token"), Is.EqualTo(Str(sale, "customer.customer_token")));
             Assert.That(Str(response, "customer.country"), Is.EqualTo("BG"));
         });
+    }
+
+    [Test]
+    public async Task WalletTokenPayout_TwoSalesWithTheToken_TheLaterTidWins()
+    {
+        var harness = new PraxisEmulatorHarness();
+        var first = await SaleAsync(harness, 20000);
+        var secondData = PraxisRequestBuilder.SaleWalletData();
+        secondData["phone"] = "+19999999999";
+        var second = (await harness.ApmAsync("sale", 20000, walletData: secondData)).Json()!;
+        Assert.That(Tid(second), Is.GreaterThan(Tid(first)));
+        var walletToken = PraxisWalletData.WalletToken(harness.Merchant.MerchantId, "cid-1", "jane.doe@example.com");
+
+        var response = (await harness.SendAsync("direct/wallet-token",
+            PraxisRequestBuilder.WalletTokenPayout(harness.Merchant, harness.Now, 5100, walletToken, null))).Json()!;
+
+        Assert.That(Str(response, "transaction.wallet.data.phone"), Is.EqualTo("+19999999999"), "same CreatedAt: the higher tid is the newer sale");
     }
 
     [Test]
@@ -949,6 +1061,23 @@ public class PraxisEWalletCaseTests
     }
 
     [Test]
+    public async Task ManageWithdrawal_ExpiredTimestamp_Status1ValidationError()
+    {
+        var harness = new PraxisEmulatorHarness();
+        var payout = Tid(await PayoutAsync(harness, 50000));
+
+        var reply = await harness.SendAsync("agent/manage-withdrawal-request",
+            PraxisRequestBuilder.ManageWithdrawal(harness.Merchant, harness.Now - 130, "cancel-withdrawal-request", payout));
+
+        Assert.Multiple(() =>
+        {
+            Assert.That(reply.Body, Is.EqualTo(
+                """{"status":1,"description":"Validation Error","errors":{"timestamp":["Timestamp expired: 130s old, should be at most 60s old (required with merchant_id)"]}}"""));
+            Assert.That(reply.Headers.ContainsKey(PraxisSigner.HeaderName), Is.False);
+        });
+    }
+
+    [Test]
     public async Task ManageWithdrawal_NonNumericId_WrongCredentials()
     {
         var harness = new PraxisEmulatorHarness();
@@ -989,6 +1118,7 @@ public class PraxisEWalletCaseTests
         Assert.Multiple(() =>
         {
             Assert.That(PraxisTestCases.FollowUp(PraxisEWalletCases.PageAbandoned), Is.Not.Null);
+            Assert.That(PraxisTestCases.FollowUp(PraxisEWalletCases.PageOpenedAbandoned), Is.Not.Null);
             Assert.That(PraxisTestCases.FollowUp(PraxisEWalletCases.PendingTimeout), Is.Not.Null);
             Assert.That(PraxisTestCases.FollowUp("nothing"), Is.Null);
             Assert.That(PraxisEWalletCases.Button(20000, "maybe"), Is.Null);

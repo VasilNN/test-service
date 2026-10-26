@@ -39,6 +39,37 @@ public class PostmanImportServiceTests
     }
 
     [Test]
+    public void ParseCollection_SavedResponseTransportHeaders_AreNotCopied()
+    {
+        var expectations = Parse("""
+            {
+              "item": [
+                {
+                  "name": "Get Foo",
+                  "request": { "method": "GET", "url": { "raw": "https://example.com/foo", "path": ["foo"] } },
+                  "response": [
+                    {
+                      "code": 200,
+                      "header": [
+                        { "key": "Content-Type", "value": "application/json" },
+                        { "key": "content-length", "value": "123" },
+                        { "key": "Content-Encoding", "value": "gzip" },
+                        { "key": "Transfer-Encoding", "value": "chunked" },
+                        { "key": "Connection", "value": "keep-alive" },
+                        { "key": "X-Custom", "value": "yes" }
+                      ],
+                      "body": "{}"
+                    }
+                  ]
+                }
+              ]
+            }
+            """);
+
+        Assert.That(expectations[0].ResponseTemplate.Headers.Keys, Is.EquivalentTo(new[] { "Content-Type", "X-Custom" }));
+    }
+
+    [Test]
     public void ParseCollection_ItemWithoutSavedResponse_Defaults200AndEmptyBody()
     {
         var expectations = Parse("""
