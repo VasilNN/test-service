@@ -930,7 +930,7 @@ The 3DS page answers with real HTTP statuses and a JSON `message`: `GET`/submit 
 5. Lower `timeScale` to shorten the notification delays (15 s card, 12 s e-wallet) and the timeouts (540 s card, 450 s e-wallet).
 
 #### 7.5.5 Test Cases (card, Test Card Processor)
-Triggers name the amount in major units, as the Praxis testing page does: "Amount 11" is a request `amount` of `1100`. Amounts in the results are minor units, as in the request and response (`4900` = 49.00). CVV other than the listed ones declines.
+Triggers name the amount in major units, as the Praxis testing page does: "Amount 11" is a request `amount` of `1100`. Amounts in the results are minor units, as in the request and response (`4900` = 49.00). CVV other than the listed ones declines. An AMEX card (number starting with `3`) sends the listed CVV with a fourth digit `1`, as the Praxis testing page says (`568` -> `5681`); other cards with a four-digit CVV decline.
 
 | Trigger | First response | Then |
 |---|---|---|

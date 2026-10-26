@@ -195,7 +195,9 @@ public partial class PraxisEmulator : IProviderEmulator
         if (type == "sale")
         {
             // A sale by card_token carries no CVV, so it falls to the default (declined) row.
-            var saleCase = PraxisTestCases.ForSale(card.GetValueOrDefault("cvv", string.Empty), amount);
+            var saleCase = PraxisTestCases.ForSale(
+                PraxisTestCases.TriggerCvv(card.GetValueOrDefault("card_number", string.Empty), card.GetValueOrDefault("cvv", string.Empty)),
+                amount);
             tx.CaseName = saleCase.Name;
             tx.Is3d = saleCase.Is3d;
             tx.IsAsync = saleCase.Redirects;

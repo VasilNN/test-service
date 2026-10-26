@@ -101,6 +101,27 @@ public class PraxisEmulatorCaseTests
         });
     }
 
+    // AMEX sends the trigger CVV with a fourth digit 1 (568 -> 5681) [doc]; other cards do not.
+    [TestCase("378282246310005", "5681", "approved", "AMEX")]
+    [TestCase("378282246310005", "3331", "initialized", "AMEX")]
+    [TestCase("4111111111111111", "5681", "rejected", "VISA")]
+    public async Task Sale_FourDigitCvv_SelectsTheCaseOnlyForAmex(string cardNumber, string cvv, string status, string cardType)
+    {
+        var harness = new PraxisEmulatorHarness();
+        var body = PraxisRequestBuilder.Sale(harness.Merchant, harness.Now, cvv, 4900, NotificationUrl);
+        body["card_data"] = PraxisRequestBuilder.CardData(harness.Merchant.Secret, harness.Now, cvv, cardNumber);
+
+        var reply = await harness.SendAsync("api/direct-process", body);
+        var response = reply.Json()!;
+
+        Assert.Multiple(() =>
+        {
+            Assert.That(Str(response, "status"), Is.EqualTo("0"), reply.Body);
+            Assert.That(Str(response, "transaction.transaction_status"), Is.EqualTo(status));
+            Assert.That(Str(response, "transaction.card.card_type"), Is.EqualTo(cardType));
+        });
+    }
+
     [Test]
     public async Task Sale_3ds_HasRedirectUrlAndAsyncFlag()
     {

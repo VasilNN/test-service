@@ -88,6 +88,13 @@ public static class PraxisTestCases
         new(["905"], null, () => new PraxisSaleCase("non-3d-decline", Decline("GE-007", "Transaction failed. Please contact our support team")))
     ];
 
+    /// <summary>
+    /// The CVV that selects the case: an AMEX card (number starting with 3) sends the trigger CVV with a fourth digit 1
+    /// (568 -> 5681) [doc]; every other card sends it as is.
+    /// </summary>
+    public static string TriggerCvv(string cardNumber, string cvv) =>
+        cardNumber.StartsWith('3') && cvv.Length == 4 && cvv[3] == '1' ? cvv[..3] : cvv;
+
     /// <summary>The case of a card sale with this CVV and amount (minor units).</summary>
     public static PraxisSaleCase ForSale(string cvv, long amount)
     {
